@@ -1,53 +1,26 @@
 /* *************************************************************
 ****************************************************************
-TTEM_GDS.H - Terrestrial Ecosystem Model Version 4.5
+TTEM45.H - Terrestrial Ecosystem Model, XTEM version 4.5
 ****************************************************************
 
-Modifications:
-
-20060126 - DWK created by modifying ttem50b5.h
-20060126 - DWK changed include from temconsts51.hpp to
-           temconsts43.hpp
-20060126 - DWK deleted global const int STSY
-20060126 - DWK changed include from atms50b5.h to atms437.h
-20060126 - DWK changed include from tveg50b5.h to tveg437.h
-20060126 - DWK changed include from tsoil50b5.h to tsoil437.h
-20060126 - DWK changed include from tmcrb50b5.h to tmcrb437.h
-20060126 - DWK changed include from humnact50b5.h to
-           humnact437.h
-20060126 - DWK changed class TTEM50 to class TTEM43
-20060126 - DWK added I_FOZONE and I_FINDOZNE to enum temkey
-20060126 - DWK deleted I_TSOIL, I_DST0, I_DST5, I_DST10,
-           I_DST20, I_DST50, I_DST100, I_DST200, I_FRONTD,
-           I_THAWBE, I_THAWEND, I_THAWPCT, and I_ACTLAYER
-           from enum temkey
-20060126 - DWK added GET_D40 and GET_FOZONE to enum seykey
-20060126 - DWK deleted enum sstkey
-20060126 - DWK deleted public functions
-           void displayOptionalSoilTemp(),
-           double getOptionalSoilTemp(), inline sstykey& next()
-           and inline sstykey& prev(),
-20060126 - DWK deleted ofstream& rflog1 from function call to
-           public functions int monthlyTransient() and
-           int stepmonth()
-20060126 - DWK deleted public string snowfile and
-           string slayerfile
-20060126 - DWK changed public Humanact50 ag to Humanact43 ag
-20060126 - DWK changed public Atmosphere50 to Atmosphere43
-20060126 - DWK changed public Tmicrobe50 to Tmicrobe43
-20060126 - DWK changed public Tsoil50 to Tsoil43
-20060126 - DWK changed public Tveg50 to Tveg43
-20060126 - DWK deleted public sstykey ssty[STSY]
-20060126 - DWK deleted ofstream& rflog1 from function call to
-           private function void getenviron()
-20070105 - TWC renamed to ttem45
-2007 - TWC/BSF Summary
-      temkey: VSM, PCTP, RMLEAF, RMROOT, GC, GS, TRANST, EVAP, INTER
-	  seykey: RMLEAF, RMROOT
-	  swykey: GC, GS, TRANST, EVAP, INTER
-	  Public Vars.: string gcfile
-	  Private Vars.: water, pota, pota, swp, eetnew, sm, smnew,
-	                 nirrn, eetpet
+Version: XTEM version 4.5
+20241110 Changed: version number 4.5 (only the input and output, configuration and time handling changed).
+20241109 Changed: Parameters are read with tem::yaml::Reader (tem_yaml.h) instead of ProcessXML, because the
+         parameter files are YAML.
+20241109 Changed: The days of a step come from Timestep (ttimestep.h) and arrays are sized MAXCYCLE, so the
+         step is set by run_dt and run_dt_units and is not fixed at twelve months.
+20241109 Updated: Nitrogen fertilizer of cropland and pasture (xnfertflag) is passed to the soil nitrogen
+         budget.
+20241111 Changed: Wildfire is the Tfire class of GDSTEM-FIRE (fire.h); its burned area is the output areaburn.
+20241109 Updated: The ODE solver (ode_solver) and the soil respiration function (rsoil_method) are chosen at
+         run time.
+20241109 Updated: The state vector holds NUMTEM entries and the new output variables are listed.
+20241109 Fixed: Numbers are parsed strictly: a missing key or a value that is not a number stops the run, with
+         the file and key named (atoi and atof read such values as 0).
+20241109 Updated: Members config and configfile replace gofile, goname and goyaml; a Reader per community
+         replaces the stream of each site calibration file.
+20241109 Updated: cutstep and isCutStep() (see the .cpp).
+20241110 Changed: Yearly and fire arrays are vectors; allocate() sizes them after the inputs are opened.
 
 ****************************************************************
 
@@ -91,11 +64,12 @@ Cheney, W., and D. Kincaid.  1985.  Numerical mathematics and
 ****************************************************************
 ************************************************************** */
 
-#ifndef TTEM_GDS_H
-#define TTEM_GDS_H
+#ifndef TTEM45_DISURB_H
+#define TTEM45_DISURB_H
 
 #include "temconsts_gds.hpp"
-#include "tprocessXML_gds.h"
+#include <random>
+#include "tem_yaml.h"
 
 #ifdef CALIBRATE_TEM
   // Additional global constants
@@ -126,6 +100,7 @@ Cheney, W., and D. Kincaid.  1985.  Numerical mathematics and
 //   ecosystem
 
 #include "humnact_gds.h" // TTEM45 uses Humnact45 class
+#include "fire.h"  // TTEM45 uses Tfire class
 
 
 class Ttem45
@@ -134,6 +109,18 @@ class Ttem45
   public:
 
      Ttem45();
+
+     // sizes the arrays of steps, years and cohorts once CYCLE, NYEARS and NCOHORTS are known
+     void allocate( void )
+     {
+       wevapd.assign( CYCLE, 0.0 );
+       wevapn.assign( CYCLE, 0.0 );
+       rfrac.assign( CYCLE, 0.0 );
+       ig.assign( CYCLE, 0.0 );
+       nmax_grow.assign( NCOHORTS, 0.0 );
+       qualcon.assign( NYEARS, 0 );
+       ag.allocate();
+     }
 
      enum temkey
      {
@@ -225,8 +212,11 @@ class Ttem45
        I_AGINNUP,  I_NATINNUP, I_AGVNUP,   I_NATVNUP,
        I_AGVNMBL,  I_NATVNMBL,
        I_AGVNRSRB, I_NVNRSRB,  I_AGLTRN,   I_NATLTRN,   I_CLIPPINGS,
-       I_STANDDEADC,   I_STANDDEADN, I_VOLAC,  I_VOLAN
-//  99 extra variables
+       I_STANDDEADC,   I_STANDDEADN, I_VOLAC,  I_VOLAN,
+       I_AREABURN,
+
+       I_POTEVAP,  I_ACTEVAP
+//  100 extra variables
      };
 
      #ifdef CALIBRATE_TEM
@@ -447,7 +437,8 @@ class Ttem45
        double getOptionalWflx( const int& optflx );
      #endif
 
-     void getsitecd( const int& dv, const string& ecd );
+     void loadSiteCalibrations( std::ostream& log );
+     void getsitecd( int slot, const string& ecd, bool (&loaded)[MAXCMNT] );
      
      void initializeState( void );
      void initializecalibState( void );
@@ -456,7 +447,7 @@ class Ttem45
                            const int& pdm,
                            const double& outtol,
                            const int& ichrt,
-                           ofstream& flog1 );
+                           std::ostream& flog1 );
 
      #ifdef CALIBRATE_TEM
        inline seykey& keyjump( const int& keyloc, seykey& s )
@@ -511,7 +502,12 @@ class Ttem45
                     int& intflag,
                     const double& ptol,
                     const int& icohort,
-                    ofstream& flog1 );
+                    std::ostream& flog1,
+                    bool transient = false );
+
+#if TEM_ENABLE_STORM
+     void setStormReturnIntervals( double lon, double lat, double storm, double hurricane );
+#endif
 
      int testEquilibrium( const int& pdyr,
                           const int& nyears,
@@ -845,10 +841,8 @@ class Ttem45
        string gcfile;
      #endif
        
-     ifstream gofile;
-     ifstream teminfile;
-     string goname;
-     ProcessXML45 goxml;
+     string configfile;
+     tem::yaml::Reader config;
        
      #ifdef CALIBRATE_TEM
        int adapttol;
@@ -891,11 +885,23 @@ class Ttem45
 
      int firemnthcnt;
      int fireoccur;
+     Tfire fire;
+     // fire inputs of the cell: lightning flashes km-2 of each step, population density (km-2), GDP per capita,
+     // longitude (degrees) and the ignitions of the step
+     std::vector<double> ig = std::vector<double>( 12, 0.0 );
+     double pop;
+     double gdp;
+     double lon;
+     double ni;
      int stormoccur;
 //  PCP code
      static int rcount;
      static int mcount;
      static int lcount;
+     // Last step of a run that ends inside a year (-1 otherwise); it closes the year like the last step of a full year.
+     static int cutstep;
+     static void setCutStep( const int& step ) { cutstep = step; }
+     static bool isCutStep( const int& pdm ) { return pdm == cutstep; }
      static double rco;
      static double mco;
      static double lco;
@@ -906,6 +912,8 @@ class Ttem45
      int initFlag;
 
      static double inittol;
+
+     static double odedtmax; // largest integrator sub-step, as a fraction of the model step (rkbs)
 
      #ifdef CALIBRATE_TEM
        int intbomb;
@@ -937,11 +945,8 @@ class Ttem45
 
      vector<string> predstr;
 
-//     int qualcon[MAXRTIME];
-     int qualcon[10000];
+     std::vector<int> qualcon = std::vector<int>( 1 );
 
-     double storm;  // return interval for tropical storms
-     double hurr;  // return interval for hurricanes
      double timber;  // return interval for timber
      int retry;
 
@@ -957,6 +962,10 @@ class Ttem45
      Tsoil45 soil;
 
      static int startyr;
+
+     // ode solver ( 1 rkbs, 2 rkf ) and soil respiration method ( 1 tim, 2 sib ), set from the yaml
+     int odesolver;
+     int rsoilmethod;
 
      static int strteq;
 
@@ -1001,9 +1010,9 @@ class Ttem45
      string updated;
      string description;
 
-     double wevapd[CYCLE];
-     double wevapn[CYCLE];
-     double rfrac[CYCLE];
+     std::vector<double> wevapd = std::vector<double>( 12 );
+     std::vector<double> wevapn = std::vector<double>( 12 );
+     std::vector<double> rfrac = std::vector<double>( 12 );
      
      int harcnt;
 /* **************************************************************
@@ -1016,6 +1025,12 @@ class Ttem45
 
 
   private:
+
+#if TEM_ENABLE_STORM
+     void applyStormDisturbance( int cohort, std::ostream& log );
+     double stormLon = 0.0, stormLat = 0.0;
+     double stormYears = 0.0, hurricaneYears = 0.0;
+#endif
 
 /* **************************************************************
 		 Private Functions
@@ -1085,7 +1100,7 @@ class Ttem45
 		     Private Variables
 ************************************************************** */
 
-     ifstream fecd[MAXCMNT];
+     tem::yaml::Reader fecd[MAXCMNT];
      
      long delta_count;
 
@@ -1095,10 +1110,9 @@ class Ttem45
      // Net Ecosystem Production
      double nep;      // (g C / (sq. meter * month))
 
+     std::vector<double> nmax_grow = std::vector<double>( 1 );
      // Net Biome Productivity
      double nbp;
-
-     double nmax_grow[MAXCHRTS];
 
      // NINPUT needed for calibration
      double ninput;
@@ -1110,7 +1124,7 @@ class Ttem45
      double totalc;   // (g C/sq. meter)
 
      // Values of ODE state variables for current month
-     double y[NUMEQ];
+     double y[NUMTEM];
      
      
      // Variables for displaying "optional fluxes" at the end of a year: sum, max, avg, min      
@@ -1124,39 +1138,41 @@ class Ttem45
      int blackhol;
 
      int syint;
+
+     // ODE solver: 1 Bulirsch-Stoer (rkbs), 0 Runge-Kutta-Fehlberg (rkf); soil surface resistance: 0 fixed, 1 Tim, 2 SiB
      int test;
 
-     double dum4[NUMEQ];
-     double error[NUMEQ];
+     double dum4[NUMTEM];
+     double error[NUMTEM];
 
-     double dum5[NUMEQ];
-     double dumy[NUMEQ];
+     double dum5[NUMTEM];
+     double dumy[NUMTEM];
 
-     double ydum[NUMEQ];
-     double dy[NUMEQ];
-     double yprime[NUMEQ];
-     double rk45[NUMEQ];
+     double ydum[NUMTEM];
+     double dy[NUMTEM];
+     double yprime[NUMTEM];
+     double rk45[NUMTEM];
 
-     double f11[NUMEQ];
-     double f2[NUMEQ];
-     double f13[NUMEQ];
-     double f3[NUMEQ];
-     double f14[NUMEQ];
-     double f4[NUMEQ];
-     double f15[NUMEQ];
-     double f5[NUMEQ];
-     double f16[NUMEQ];
-     double f6[NUMEQ];
+     double f11[NUMTEM];
+     double f2[NUMTEM];
+     double f13[NUMTEM];
+     double f3[NUMTEM];
+     double f14[NUMTEM];
+     double f4[NUMTEM];
+     double f15[NUMTEM];
+     double f5[NUMTEM];
+     double f16[NUMTEM];
+     double f6[NUMTEM];
      
-     double zstate[NUMEQ];
-     double dum2[NUMEQ];
-     double dum3[NUMEQ];
-     double dp2[NUMEQ]; 
-     double dp3[NUMEQ];
-     double dz1[NUMEQ]; 
-     double dz2[NUMEQ]; 
-     double dz3[NUMEQ]; 
-     double dz4[NUMEQ];
+     double zstate[NUMTEM];
+     double dum2[NUMTEM];
+     double dum3[NUMTEM];
+     double dp2[NUMTEM]; 
+     double dp3[NUMTEM];
+     double dz1[NUMTEM]; 
+     double dz2[NUMTEM]; 
+     double dz3[NUMTEM]; 
+     double dz4[NUMTEM];
 
      static double  a1;
 

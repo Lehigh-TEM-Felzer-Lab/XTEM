@@ -3,22 +3,18 @@
 HUMNACT_GDS.CPP - describes human disturbances to natural
                      ecosystems
 
-Modifications:
-
-20060126 - DWK created by modifying humnact50b5.cpp
-20060126 - DWK changed include from humnact50b5.h to
-           humnact437.h
-20060126 - DWK changed Humanact50:: to Humanact::
-20060126 - DWK changed inheritance of ProcessXML50 to
-           ProcessXML43 in Humanactflux()
-20070105 - TWC changed Humanactflux:: to Humnact45::
-2007 - TWC/BSF summary
-     getecd: add GDDMIN, GDDSEED, GDDHARVST, tkill,
-	         isPerennial
-	 harvest: account for no N loss if not fertilized
-	          and perennial crops
-	 setAgricFlags: irrgflag and fertflag are new
-	 updateCropResidueFluxes: special provisions if no harvest
+Version: XTEM version 4.5
+20241110 Changed: version number 4.5 (only the input and output, configuration and time handling changed).
+20241109 Changed: Parameters are read with tem::yaml::Reader (tem_yaml.h) instead of ProcessXML, because the
+         parameter files are YAML.
+20241109 Updated: Nitrogen fertilizer of cropland and pasture (xnfertflag) is passed to the soil nitrogen
+         budget.
+20241109 Fixed: Numbers are parsed strictly: a missing key or a value that is not a number stops the run, with
+         the file and key named (atoi and atof read such values as 0).
+20241109 Changed: Grazing intensity and the standing-dead decay rate follow the step: 0.05 and 11/1200 per
+         month, 0.05 * days / 30.5 and 11/100 * days / 365 for daily steps (TEM_Daily 0.05/30.5 and 11/36500).
+20241110 Changed: Standing-dead decay and grazing rates use rateToStep(0.11, year) and rateToStep(0.05, month),
+         one expression for every step.
 
 ****************************************************************
 ************************************************************* */
@@ -54,13 +50,14 @@ Modifications:
 
   using std::string;
 
+#include "ttimestep.h"
 #include "humnact_gds.h"
 
 
 /* *************************************************************
 ************************************************************* */
 
-Humnact45::Humnact45() : ProcessXML45()
+Humnact45::Humnact45()
 {
 
   int i;
@@ -71,6 +68,9 @@ Humnact45::Humnact45() : ProcessXML45()
 
   state = 0;
   prvstate = 0;
+
+  fertncrop = ZERO;
+  fertnpasture = ZERO;
 
   massbalflg = 1;
   fertflag = 0;
@@ -310,25 +310,15 @@ void Humnact45::frostDamage( const double& vegc,
 
 void Humnact45::getecd( const string& ecd )
 {
-  ifstream infile;
   int dcmnt;
   int comtype;
 
-  infile.open( ecd.c_str(), ios::in );
+  tem::yaml::Reader infile( ecd );
+  const int ncommunity = infile.communityCount( MAXCMNT - 1 );
 
-  if( !infile )
+  for( dcmnt = 1; dcmnt <= ncommunity; ++dcmnt )
   {
-    cerr << "\nCannot open " << ecd;
-    cerr << " for agriculture ECD input" << endl;
-
-    exit( -1 );
-  }
-
-  getXMLrootNode( infile, "agECD" );
-
-  for( dcmnt = 1; dcmnt < MAXCMNT; ++dcmnt )
-  {
-    comtype = getXMLcommunityNode( infile, "agECD" );
+    comtype = infile.nextCommunity();
 
     if( comtype >= MAXCMNT )
     {
@@ -340,90 +330,47 @@ void Humnact45::getecd( const string& ecd )
     }
 
 
-    nvretconv[comtype] = getXMLcmntArrayDouble( infile,
-                                                "agECD",
-                                                "nvretconv",
-                                                comtype );
+    nvretconv[comtype] = infile.getDouble( "nvretconv" );
 
-    nsretconv[comtype] = getXMLcmntArrayDouble( infile,
-                                                "agECD",
-                                                "nsretconv",
-                                                comtype );
+    nsretconv[comtype] = infile.getDouble( "nsretconv" );
 
-    tillfactor[comtype] = getXMLcmntArrayDouble( infile,
-                                                 "agECD",
-                                                 "tillfactor",
-                                                 comtype );
+    tillfactor[comtype] = infile.getDouble( "tillfactor" );
 
-    harvstC[comtype] = getXMLcmntArrayDouble( infile,
-                                              "agECD",
-                                              "harvstC",
-                                              comtype );
+    harvstC[comtype] = infile.getDouble( "harvstC" );
 
-    harvstN[comtype] = getXMLcmntArrayDouble( infile,
-                                              "agECD",
-                                              "harvstN",
-                                              comtype );
+    harvstN[comtype] = infile.getDouble( "harvstN" );
 
-    residueC[comtype] = getXMLcmntArrayDouble( infile,
-                                               "agECD",
-                                               "residueC",
-                                               comtype );
+    residueC[comtype] = infile.getDouble( "residueC" );
 
-    residueN[comtype] = getXMLcmntArrayDouble( infile,
-                                               "agECD",
-                                               "residueN",
-                                               comtype );
+    residueN[comtype] = infile.getDouble( "residueN" );
 
-    cropseedC[comtype] = getXMLcmntArrayDouble( infile,
-                                                "agECD",
-                                                "cropseedC",
-                                                comtype );
+    cropseedC[comtype] = infile.getDouble( "cropseedC" );
 
-    cropseedSTON[comtype] = getXMLcmntArrayDouble( infile,
-                                               "agECD",
-                                               "cropseedSTON",
-                                               comtype );
+    cropseedSTON[comtype] = infile.getDouble( "cropseedSTON" );
 
-    GDDMIN[comtype] = getXMLcmntArrayDouble( infile,
-                                           "agECD",
-                                           "gddmin",
-                                           comtype );
+    GDDMIN[comtype] = infile.getDouble( "gddmin" );
 
-    GDDSEED[comtype] = getXMLcmntArrayDouble( infile,
-                                            "agECD",
-                                            "gddseed",
-                                            comtype );
+    GDDSEED[comtype] = infile.getDouble( "gddseed" );
 
-    GDDHARVST[comtype] = getXMLcmntArrayDouble( infile,
-                                             "agECD",
-                                             "gddharvst",
-                                             comtype );
+    GDDHARVST[comtype] = infile.getDouble( "gddharvst" );
 
-    tkill[comtype] = getXMLcmntArrayDouble( infile,
-                                          "agECD",
-                                          "tkill",
-                                          comtype );
+    tkill[comtype] = infile.getDouble( "tkill" );
 
-    isPerennial[comtype] = getXMLcmntArrayInt( infile,
-                                             "agECD",
-                                             "isPerennial",
-                                             comtype );
+    isPerennial[comtype] = infile.getInt( "isPerennial" );
 
 
-    endXMLcommunityNode( infile );
+    infile.endEntry();
   }
 
-  if( dcmnt < MAXCMNT )
+  if( ncommunity < 1 )
   {
-    cerr << endl << " Parameters found for only " << dcmnt;
+    cerr << endl << " No community types found" << "";
     cerr << " community types out of a maximum of ";
     cerr << (MAXCMNT-1) << " types in agECD" << endl;
 
     exit( -1 );
   }
 
-  infile.close();
 
 };
 
@@ -445,7 +392,7 @@ void Humnact45::grazing( const double& leafc,
 double frcab, grazint;
 
 //  grazint = 0.075;
-  grazint = 0.05;
+  grazint = getTimestep45().rateToStep( 0.05, tem_time::SECONDS_PER_MONTH );
 
   if(leafc+sapwoodc+heartwoodc+rootc == 0.0)
   {
@@ -863,14 +810,14 @@ void Humnact45::resetYrFluxes( void )
 /* *************************************************************
 ************************************************************* */
 
-void Humnact45::setAgricFlags( ofstream& rflog1 )
+void Humnact45::setAgricFlags( std::ostream& rflog1 )
 {
 
   cout << "Are agricultural soils tilled?" << endl;
   cout << "Enter 0 for no:" << endl;
   cout << "Enter 1 for yes:" << endl;
 
-  cin >> tillflag;
+  std::cin >> tillflag;
 
   rflog1 << "Are agricultural soils tilled?" << endl;
   rflog1 << "Enter 0 for no:" << endl;
@@ -1006,8 +953,9 @@ void Humnact45::updatestanddead(const int& pdyr,
   if(standdead.carbon > 0){
 //  slash.carbon += standdead.carbon * (1./1200.);       //since this happens each month, decay only 0.1 * 1/12
 //  11% loss per year from Zimmerman et al. 1995; Odum 1970
-  c_add = standdead.carbon * (11./1200.) * rhmoist * dq10;
-  n_add = standdead.nitrogen * (11./1200.) * rhmoist * dq10;
+  const double sdrate = getTimestep45().rateToStep( 0.11, tem_time::SECONDS_PER_YEAR );
+  c_add = standdead.carbon * sdrate * rhmoist * dq10;
+  n_add = standdead.nitrogen * sdrate * rhmoist * dq10;
 
 //
 // 2/3 vs 1/3 split from Matson et al., 1987
@@ -1046,6 +994,8 @@ void Humnact45::updatestanddead(const int& pdyr,
 
  } */
 }
+
+
 /* *************************************************************
  * ***************************************************************/
 

@@ -3,10 +3,16 @@
 TSOIL_GDS.CPP - object describing general characteristics of
                 soil
 
-Modifications:
-
-20060106 - DWK created by modifying Tsoilflux2b.cpp
-20070105 - TWC changed name to tsoil45
+Version: XTEM version 4.5
+20241110 Changed: version number 4.5 (only the input and output, configuration and time handling changed).
+20241109 Changed: Parameters are read with tem::yaml::Reader (tem_yaml.h) instead of ProcessXML, because the
+         parameter files are YAML.
+20241109 Changed: The days of a step come from Timestep (ttimestep.h) and arrays are sized MAXCYCLE, so the
+         step is set by run_dt and run_dt_units and is not fixed at twelve months.
+20241109 Fixed: Numbers are parsed strictly: a missing key or a value that is not a number stops the run, with
+         the file and key named (atoi and atof read such values as 0).
+20241110 Changed: Yearly and per-step arrays are std::vector sized at run time (CYCLE, NYEARS, NCOHORTS);
+         MAXCYCLE, MAXRTIME and MAXCHRTS removed.
 
 2007:  TWC/BSF
     resetMonthlyFluxes: evap = 0
@@ -14,7 +20,6 @@ Modifications:
 	setSWP function
 	updateHydrology: avlh2o instead of sh2o; adapt function
 	   to allow ineet = eet instead of from xeet function
-
 
 ****************************************************************
 ************************************************************* */
@@ -52,12 +57,13 @@ Modifications:
   using std::string;
 
 
+#include "ttimestep.h"
 #include "tsoil_gds.h"
 
 /* *************************************************************
 ************************************************************* */
 
-Tsoil45::Tsoil45( void ) : ProcessXML45()
+Tsoil45::Tsoil45( void )
 {
 
   text  = -99;
@@ -130,18 +136,7 @@ Tsoil45::Tsoil45( void ) : ProcessXML45()
 
   // Number of days per month
 
-  ndays[0] = 31;
-  ndays[1] = 28;
-  ndays[2] = 31;
-  ndays[3] = 30;
-  ndays[4] = 31;
-  ndays[5] = 30;
-  ndays[6] = 31;
-  ndays[7] = 31;
-  ndays[8] = 30;
-  ndays[9] = 31;
-  ndays[10] = 30;
-  ndays[11] = 31;
+  setNDAYS();
 
 };
 
@@ -155,27 +150,17 @@ Tsoil45::Tsoil45( void ) : ProcessXML45()
 
 void Tsoil45::getrootz( const string& ecd )
 {
-  ifstream infile;
   int dcmnt;
   int comtype;
 
 
-  infile.open( ecd.c_str(), ios::in );
+  tem::yaml::Reader infile( ecd );
+  const int ncommunity = infile.communityCount( MAXCMNT - 1 );
 
-  if( !infile )
-  {
-    cerr << endl;
-    cerr << "Cannot open " << ecd << " for root ECD input";
-    cerr << endl;
-    exit( -1 );
-  }
-
-  getXMLrootNode( infile, "rootzECD" );
-
-  for( dcmnt = 1; dcmnt < MAXCMNT; ++dcmnt )
+  for( dcmnt = 1; dcmnt <= ncommunity; ++dcmnt )
   {
 
-    comtype = getXMLcommunityNode( infile, "rootzECD" );
+    comtype = infile.nextCommunity();
 
     if( comtype >= MAXCMNT )
     {
@@ -185,29 +170,22 @@ void Tsoil45::getrootz( const string& ecd )
       exit( -1 );
     }
 
-    rootzc[comtype] = getXMLcmntArrayDouble( infile,
-                                             "rootzECD",
-                                             "rootzc",
-                                             comtype );
+    rootzc[comtype] = infile.getDouble( "rootzc" );
 
-    minrootz[comtype] = getXMLcmntArrayDouble( infile,
-                                               "rootzECD",
-                                               "minrootz",
-                                               comtype );
+    minrootz[comtype] = infile.getDouble( "minrootz" );
 
 
-    endXMLcommunityNode( infile );
+    infile.endEntry();
   }
 
-  if ( dcmnt < MAXCMNT )
+  if( ncommunity < 1 )
   {
-    cerr << endl << " Parameters found for only " << dcmnt;
+    cerr << endl << " No community types found" << "";
     cerr << " community types out of a maximum of ";
     cerr << (MAXCMNT-1) << " types in rootzECD" << endl;
     exit( -1 );
   }
 
-  infile.close();
 
 };
 
@@ -720,3 +698,10 @@ void Tsoil45::xtext( const int& pdcmnt,
 
 };
 
+
+
+void Tsoil45::setNDAYS( void )
+{
+  ndays.assign( CYCLE, 0 );
+  for( int i = 0; i < CYCLE; ++i ) { ndays[i] = getTimestep45().getDAYS( i ); }
+};

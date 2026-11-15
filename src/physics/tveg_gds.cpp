@@ -5,8 +5,28 @@ TVEG_GDS.CPP - object describing characteristics of vegetation
                 
   (Comments below)
 ****************************************************************
+Version: XTEM version 4.5
+20241110 Changed: version number 4.5 (only the input and output, configuration and time handling changed).
+20241109 Changed: Parameters are read with tem::yaml::Reader (tem_yaml.h) instead of ProcessXML, because the
+         parameter files are YAML.
+20241109 Changed: The days of a step come from Timestep (ttimestep.h) and arrays are sized MAXCYCLE, so the
+         step is set by run_dt and run_dt_units and is not fixed at twelve months.
+20241109 Updated: The potential and actual evapotranspiration are kept (getPOTEVAP, getACTEVAP) for the
+         output.
+20241109 Fixed: Numbers are parsed strictly: a missing key or a value that is not a number stops the run, with
+         the file and key named (atoi and atof read such values as 0).
+20241109 Fixed: The nitrogen average (cnavg) and the allocation fractions are initialised, and phen is checked
+         to be 0, 1 or 2.
+20241109 Changed: Constants that differ between TEM_Monthly and TEM_Daily follow the step at run time: the
+         monthly rate nmax_grow through rateToStep, leaf-on counts per CYCLE (TEM_Daily 365, 350 and 335),
+         allocation loss threshold 0.001 for daily steps, water limit 5 mm per day, and CYCLE in place of 12
+         in the annual averages.
+20241110 Changed: Leaf-on thresholds, loss-rate floor and water limit use one expression for every step;
+         getecd reads the optional fsr, fd, rswf_min and rswf_max.
+
 ************************************************************* */
 
+#include "tem_roles.h"
 #include<cstdio>
 
   using std::printf;
@@ -43,11 +63,12 @@ TVEG_GDS.CPP - object describing characteristics of vegetation
 
   using std::string;
 
+#include "ttimestep.h"
 #include "tveg_gds.h"
 
 /**
     Static phenology variables, used in veg.phenology, are initialized
-    the variable "phen" for each PFT is defined in the tveg.ecd file
+    the variable "phen" for each PFT is defined in the vegetation YAML file (tveg45_lulc.yaml)
 */
   enum{ I_EVERGREEN = 0, I_COLD_DEC = 1, I_STRESS_DEC = 2 };
 
@@ -55,7 +76,7 @@ TVEG_GDS.CPP - object describing characteristics of vegetation
 //const int I_COLD_DEC = 1;
 //const int I_STRESS_DEC = 2;
 
-Tveg45::Tveg45() : ProcessXML45()
+Tveg45::Tveg45()
 {
   int dcmnt;
 
@@ -255,6 +276,12 @@ Tveg45::Tveg45() : ProcessXML45()
     tauroot[dcmnt] = MISSING;
     tauseed[dcmnt] = MISSING;
 
+    igef[dcmnt] = MISSING;
+    fsr[dcmnt] = MISSING;
+    fd[dcmnt] = MISSING;
+    rswf_min[dcmnt] = MISSING;
+    rswf_max[dcmnt] = MISSING;
+
   }
 
   cmax = MISSING;
@@ -395,10 +422,10 @@ void Tveg45::allocate( const int& pdcmnt,
   double norm;
   
   // Labile-carbon and -nitrogen emptying rates for investment-allocation
-  double fleafc, fsapwoodc, frootc, ftotc;  
+  double fleafc = ZERO, fsapwoodc = ZERO, frootc = ZERO, ftotc;
   double fleafn, fsapwoodn, frootn; 
 
-  double mb_l, mcm_l, mcc_l; // marginal benefit and cost of incremental lai
+  double mb_l = 0.0, mcm_l = 0.0, mcc_l = 0.0; // marginal benefit and cost of incremental lai
   double mb_s, mcm_s, mcc_s; // marginal benefit and cost of incremental stem tissue
   double mb_r, mcm_r, mcc_r; // marginal benefit and cost of incremental roots
   
@@ -449,12 +476,13 @@ void Tveg45::allocate( const int& pdcmnt,
       mcc_l = 1.25/(12.0*tauleaf[pdcmnt])*12.0*pndays/365.0;
       break;
     case I_COLD_DEC:
-      if((12.0*rphi-phicnt) > ZERO)
+      // leaf-on steps left in the year: months for monthly steps, days for daily (TEM_Daily: 365.0*rphi-phicnt, 350, 335)
+      if((CYCLE*rphi-phicnt) > ZERO)
       {
         //mcc_l = (1.25/(rpleaf*(12.0*rphi-phicnt)))*(12.0*pndays/365.0);
-        mcc_l = 1.25/(12.0*rphi-phicnt)*12.0*pndays/365.0;
+        mcc_l = 1.25/(CYCLE*rphi-phicnt)*CYCLE*pndays/365.0;
       }
-      else if( (12.0*rphi > 11.5)||(phicnt > 11.0))
+      else if( (CYCLE*rphi > CYCLE - getTimestep45().secondsToSteps( 0.5 * tem_time::SECONDS_PER_MONTH ))||(phicnt > CYCLE - getTimestep45().secondsToSteps( tem_time::SECONDS_PER_MONTH )))
       {
         // let vegetation obey evergreen rules
 //        mcc_l = (1.25/(rpleaf*12.0*tauleaf[pdcmnt]*sla[pdcmnt]))*(12.0*pndays/365.0);
@@ -474,7 +502,7 @@ void Tveg45::allocate( const int& pdcmnt,
         //mcc_l = 1.25/(12.0*rphi-phicnt)*12.0*pndays/365.0;
         //mcc_l = 1.25/12.0*pndays/365.0;
         // mcc_l = 1.25/2.0*12.0*pndays/365.0;
-      mcc_l = 1.25/(12.0*rphi)*12.0*pndays/365.0; //BSF COMBO
+      mcc_l = 1.25/(CYCLE*rphi)*CYCLE*pndays/365.0; //BSF COMBO
       }
       //else if( (12.0*rphi > 11.5)||(phicnt > 11.0))
       //{
@@ -490,6 +518,8 @@ void Tveg45::allocate( const int& pdcmnt,
   
   tauseff = 1.0 / ( 1.0 / tausapwood[pdcmnt] + 1.0 / tauheartwood[pdcmnt] );
   
+  // an allocation needs a loss rate above a floor that is zero for monthly steps and approaches 0.001 for short steps
+  const double mceps = 0.001 * ( 1.0 - getTimestep45().rateToStep( 1.0, tem_time::SECONDS_PER_MONTH ) );
   mcc_s = 1.25/(12.0*tauseff)*12.0*pndays/365.0;
   mcc_r = 1.25/(12.0*tauroot[pdcmnt])*12.0*pndays/365.0;
 
@@ -499,7 +529,7 @@ void Tveg45::allocate( const int& pdcmnt,
    case I_EVERGREEN:
 
 //leaf net benefit:cost ratio
-  if((mb_l-(mcm_l+mcc_l)) > ZERO && (mcm_l+mcc_l) > ZERO )
+  if((mb_l-(mcm_l+mcc_l)) > ZERO && (mcm_l+mcc_l) > mceps )
   {
     fleafc = ((mb_l-(mcm_l+mcc_l))/(mcm_l+mcc_l))*(12.0*pndays/365.0);
   }
@@ -509,7 +539,7 @@ void Tveg45::allocate( const int& pdcmnt,
   }
 
 //stem net benefit:cost ratio  
-  if((mb_s-(mcm_s+mcc_s)) > ZERO && (mcm_s+mcc_s) > ZERO )
+  if((mb_s-(mcm_s+mcc_s)) > ZERO && (mcm_s+mcc_s) > mceps )
   {
     fsapwoodc = ((mb_s-(mcm_s+mcc_s))/(mcm_s+mcc_s))*(12.0*pndays/365.0);
   }
@@ -519,7 +549,7 @@ void Tveg45::allocate( const int& pdcmnt,
   }
 
 //root net benefit:cost ratio   
-  if((mb_r-(mcm_r+mcc_r)) > ZERO && (mcm_r+mcc_r) > ZERO )
+  if((mb_r-(mcm_r+mcc_r)) > ZERO && (mcm_r+mcc_r) > mceps )
   {
     frootc = ((mb_r-(mcm_r+mcc_r))/(mcm_r+mcc_r))*(12.0*pndays/365.0);
   }
@@ -533,7 +563,7 @@ void Tveg45::allocate( const int& pdcmnt,
     case I_COLD_DEC:
 
 //leaf net benefit:cost ratio
-  if((mb_l-(mcm_l+mcc_l)) > ZERO && (mcm_l+mcc_l) > ZERO )
+  if((mb_l-(mcm_l+mcc_l)) > ZERO && (mcm_l+mcc_l) > mceps )
   {
     fleafc =  ((mb_l-(mcm_l+mcc_l))/(mcm_l+mcc_l))*(12.0*pndays/365.0);
   }
@@ -544,7 +574,7 @@ void Tveg45::allocate( const int& pdcmnt,
 
 //cout << "fleafc = " << fleafc << " " << mb_l << " " << mcm_l << " " << mcc_l << endl;
 //stem net benefit:cost ratio
-  if((mb_s-(mcm_s+mcc_s)) > ZERO && (mcm_s+mcc_s) > ZERO )
+  if((mb_s-(mcm_s+mcc_s)) > ZERO && (mcm_s+mcc_s) > mceps )
   {
     fsapwoodc = ((mb_s-(mcm_s+mcc_s))/(mcm_s+mcc_s))*(12.0*pndays/365.0);
   }
@@ -554,7 +584,7 @@ void Tveg45::allocate( const int& pdcmnt,
   }
 
 //root net benefit:cost ratio
-  if((mb_r-(mcm_r+mcc_r)) > ZERO && (mcm_r+mcc_r) > ZERO )
+  if((mb_r-(mcm_r+mcc_r)) > ZERO && (mcm_r+mcc_r) > mceps )
   {
     frootc =((mb_r-(mcm_r+mcc_r))/(mcm_r+mcc_r))*(12.0*pndays/365.0);
   }
@@ -567,7 +597,7 @@ void Tveg45::allocate( const int& pdcmnt,
     case I_STRESS_DEC:
 
 //leaf net benefit:cost ratio
-  if((mb_l-(mcm_l+mcc_l)) > ZERO && (mcm_l+mcc_l) > ZERO )
+  if((mb_l-(mcm_l+mcc_l)) > ZERO && (mcm_l+mcc_l) > mceps )
   {
     fleafc =  0.75* ((mb_l-(mcm_l+mcc_l))/(mcm_l+mcc_l))*(12.0*pndays/365.0);
 //    fleafc =  ((mb_l-(mcm_l+mcc_l))/(mcm_l+mcc_l))*(12.0*pndays/365.0);
@@ -578,7 +608,7 @@ void Tveg45::allocate( const int& pdcmnt,
   }
 
 //stem net benefit:cost ratio
-  if((mb_s-(mcm_s+mcc_s)) > ZERO && (mcm_s+mcc_s) > ZERO )
+  if((mb_s-(mcm_s+mcc_s)) > ZERO && (mcm_s+mcc_s) > mceps )
   {
     fsapwoodc = 0.75* ((mb_s-(mcm_s+mcc_s))/(mcm_s+mcc_s))*(12.0*pndays/365.0);
 //    fsapwoodc = ((mb_s-(mcm_s+mcc_s))/(mcm_s+mcc_s))*(12.0*pndays/365.0);
@@ -589,7 +619,7 @@ void Tveg45::allocate( const int& pdcmnt,
   }
 
 //root net benefit:cost ratio
-  if((mb_r-(mcm_r+mcc_r)) > ZERO && (mcm_r+mcc_r) > ZERO )
+  if((mb_r-(mcm_r+mcc_r)) > ZERO && (mcm_r+mcc_r) > mceps )
   {
     frootc = 0.75* ((mb_r-(mcm_r+mcc_r))/(mcm_r+mcc_r))*(12.0*pndays/365.0);
 //    frootc = ((mb_r-(mcm_r+mcc_r))/(mcm_r+mcc_r))*(12.0*pndays/365.0);
@@ -673,7 +703,7 @@ void Tveg45::allocate( const int& pdcmnt,
   seed.allocn = seed.allocin;
   }
 
-  if(agstate == 1 && pdm == 9 && labile.carbon > 0) {
+  if(agstate == 1 && getTimestep45().isMONTHSTART( pdm, 9 ) && labile.carbon > 0) {
 //     cout << "labile carbon  = " << labile.carbon << endl;
      seed.allocc += 3.0 * labile.carbon;
      seed.allocn = seed.allocc/cnseed[pdcmnt];
@@ -989,11 +1019,11 @@ void Tveg45::deltafo3( const int& pdcmnt,
 //  if(leaf.carbon > ZERO)
   if(leaf.carbon > 0.1)
   {
-    recovery = (1.0 - fozone) * (1.0/(12.0*tauleaf[pdcmnt]) + deltaleafc/leaf.carbon );
+    recovery = (1.0 - fozone) * (1.0/(CYCLE*tauleaf[pdcmnt]) + deltaleafc/leaf.carbon );
   }
   else
   {
-    recovery = (1.0 - fozone) * (1.0/(12.0*tauleaf[pdcmnt]));
+    recovery = (1.0 - fozone) * (1.0/(CYCLE*tauleaf[pdcmnt]));
   }
 
   //  current month's ozone effect
@@ -1017,31 +1047,23 @@ void Tveg45::deltafo3( const int& pdcmnt,
 void Tveg45::getecd( const string& ecd )
 {
 /**
-    reads in ecological community data from the "veg.ecd" file, using methods
-    inherited from tprocessxml.  
+    reads in ecological community data from the vegetation YAML file, using methods
+    of tem::yaml::Reader.
 */  
   
   int comtype;
   int dcmnt;
-  ifstream infile;
 
 
-  infile.open( ecd.c_str(), ios::in );
+  tem::yaml::Reader infile( ecd );
+  const int ncommunity = infile.communityCount( MAXCMNT - 1 );
 
-  if( !infile )
-  {
-    cerr << endl << "Cannot open " << ecd;
-    cerr << " for vegetation ECD input" << endl;
-
-    exit( -1 );
-  }
-
-  getXMLrootNode( infile, "vegECD" );
-
-  for( dcmnt = 1; dcmnt < MAXCMNT; ++dcmnt )
+  for( dcmnt = 1; dcmnt <= ncommunity; ++dcmnt )
   {
 
-    comtype = getXMLcommunityNode( infile, "vegECD" );
+    std::string communitydescription;
+    comtype = infile.nextCommunity( &communitydescription );
+    tem::roles::checkCommunity( comtype, communitydescription, ecd );
 
 
     if( comtype >= MAXCMNT )
@@ -1054,144 +1076,89 @@ void Tveg45::getecd( const string& ecd )
       exit( -1 );
     }
 
-    kc[comtype]= getXMLcmntArrayDouble( infile,
-                                        "vegECD",
-                                        "kc",
-                                        comtype );
+    kc[comtype]= infile.getDouble( "kc" );
 
-    ki[comtype]= getXMLcmntArrayDouble( infile,
-                                        "vegECD",
-                                        "ki",
-                                        comtype );
+    ki[comtype]= infile.getDouble( "ki" );
 
-    tmin[comtype]= getXMLcmntArrayDouble( infile,
-                                          "vegECD",
-                                          "tmin",
-                                          comtype );
+    tmin[comtype]= infile.getDouble( "tmin" );
 
-    toptmin[comtype]= getXMLcmntArrayDouble( infile,
-                                             "vegECD",
-                                             "toptmin",
-                                             comtype );
+    toptmin[comtype]= infile.getDouble( "toptmin" );
 
-    toptmax[comtype]= getXMLcmntArrayDouble( infile,
-                                             "vegECD",
-                                             "toptmax",
-                                             comtype );
+    toptmax[comtype]= infile.getDouble( "toptmax" );
 
-    tmax[comtype]= getXMLcmntArrayDouble( infile,
-                                          "vegECD",
-                                          "tmax",
-                                          comtype );
+    tmax[comtype]= infile.getDouble( "tmax" );
 
-    raalpha[comtype]= getXMLcmntArrayDouble( infile,
-                                             "vegECD",
-                                             "raalpha",
-                                             comtype );
+    raalpha[comtype]= infile.getDouble( "raalpha" );
 
-    rabeta[comtype]= getXMLcmntArrayDouble( infile,
-                                            "vegECD",
-                                            "rabeta",
-                                            comtype );
+    rabeta[comtype]= infile.getDouble( "rabeta" );
 
-    ragamma[comtype]= getXMLcmntArrayDouble( infile,
-                                             "vegECD",
-                                             "ragamma",
-                                             comtype );
+    ragamma[comtype]= infile.getDouble( "ragamma" );
 
-    raqref[comtype]= getXMLcmntArrayDouble( infile,
-                                            "vegECD",
-                                            "raqref",
-                                            comtype );
+    raqref[comtype]= infile.getDouble( "raqref" );
 
-    ratref[comtype]= getXMLcmntArrayDouble( infile,
-                                            "vegECD",
-                                            "ratref",
-                                            comtype );
+    ratref[comtype]= infile.getDouble( "ratref" );
 
-    kn1[comtype]= getXMLcmntArrayDouble( infile,
-                                         "vegECD",
-                                         "kn1",
-                                         comtype );
+    kn1[comtype]= infile.getDouble( "kn1" );
 
-    sla[comtype]= getXMLcmntArrayDouble( infile,
-                                         "vegECD",
-                                         "sla",
-                                         comtype );
+    sla[comtype]= infile.getDouble( "sla" );
 
-    href[comtype]= getXMLcmntArrayDouble( infile,
-                                         "vegECD",
-                                         "href",
-                                         comtype );
+    href[comtype]= infile.getDouble( "href" );
 
-    krnup[comtype]= getXMLcmntArrayDouble( infile,
-                                         "vegECD",
-                                         "krnup",
-                                         comtype );
+    krnup[comtype]= infile.getDouble( "krnup" );
 
-    kallom[comtype]= getXMLcmntArrayDouble( infile,
-                                           "vegECD",
-                                           "kallom",
-                                           comtype );
+    kallom[comtype]= infile.getDouble( "kallom" );
 
-    cnleaf[comtype]= getXMLcmntArrayDouble( infile,
-                                       "vegECD",
-                                       "cnleaf",
-                                       comtype );
+    cnleaf[comtype]= infile.getDouble( "cnleaf" );
 
-    cnsapwood[comtype]= getXMLcmntArrayDouble( infile,
-                                   "vegECD",
-                                   "cnsapwood",
-                                   comtype );
+    cnsapwood[comtype]= infile.getDouble( "cnsapwood" );
 
-    cnheartwood[comtype]= getXMLcmntArrayDouble( infile,
-                               "vegECD",
-                               "cnheartwood",
-                               comtype );
+    cnheartwood[comtype]= infile.getDouble( "cnheartwood" );
 
-    cnroot[comtype]= getXMLcmntArrayDouble( infile,
-                                       "vegECD",
-                                       "cnroot",
-                                       comtype );
+    cnroot[comtype]= infile.getDouble( "cnroot" );
 
-    cnseed[comtype]= getXMLcmntArrayDouble( infile,
-                                   "vegECD",
-                                   "cnseed",
-                                   comtype );
+    cnseed[comtype]= infile.getDouble( "cnseed" );
 
-    pseedlc[comtype]= getXMLcmntArrayDouble( infile,
-                           "vegECD",
-                           "pseedlc",
-                           comtype );
+    pseedlc[comtype]= infile.getDouble( "pseedlc" );
 
-    fsaplive[comtype]= getXMLcmntArrayDouble( infile,
-                           "vegECD",
-                           "fsaplive",
-                           comtype );
+    fsaplive[comtype]= infile.getDouble( "fsaplive" );
                            
-    phen[comtype]= getXMLcmntArrayInt( infile,
-                                       "vegECD",
-                                       "phen",
-                                       comtype );
+    phen[comtype]= infile.getInt( "phen" );
+    if( phen[comtype] < I_EVERGREEN || phen[comtype] > I_STRESS_DEC )
+    {
+      cerr << endl << "phen of community " << comtype << " in " << ecd
+           << " must be 0 (evergreen), 1 (cold deciduous) or 2 (stress deciduous)" << endl;
+      exit( -1 );
+    }
 
-    nnf[comtype]= getXMLcmntArrayDouble( infile,
-                                       "vegECD",
-                                       "nnf",
-                                       comtype );
+    nnf[comtype]= infile.getDouble( "nnf" );
 
-    endXMLcommunityNode( infile );
+    // optional: the fire parameters of GDSTEM-FIRE, used when veg_fire is 1
+    if( infile.hasEntry( "fsr" ) || infile.hasEntry( "fd" ) || infile.hasEntry( "rswf_min" ) || infile.hasEntry( "rswf_max" ) )
+    {
+      if( !infile.hasEntry( "fsr" ) || !infile.hasEntry( "fd" ) || !infile.hasEntry( "rswf_min" ) || !infile.hasEntry( "rswf_max" ) )
+      {
+        cerr << endl << "community " << comtype << " in " << ecd << " needs all of fsr, fd, rswf_min and rswf_max, or none" << endl;
+        exit( -1 );
+      }
+
+      fsr[comtype] = infile.getDouble( "fsr" );
+      fd[comtype] = infile.getDouble( "fd" );
+      rswf_min[comtype] = infile.getDouble( "rswf_min" );
+      rswf_max[comtype] = infile.getDouble( "rswf_max" );
+    }
+
+    infile.endEntry();
   }
 
-  if( dcmnt < MAXCMNT )
+  if( ncommunity < 1 )
   {
-    cerr << endl << " Parameters found for only " << dcmnt;
+    cerr << endl << " No community types found" << "";
     cerr << " community types out of a maximum of ";
     cerr << (MAXCMNT-1) << " types in vegECD" << endl;
 
     exit( -1 );
   }
 
-  infile.close();
 
 };
 
@@ -1234,7 +1201,7 @@ void Tveg45::gppxclm( const int& pdcmnt,
 //  double fd, fp, ci, fco2, fh2o;
   double fd, fp, ci;
   double cmaxgcmo;
-  double cnavg;
+  double cnavg = ZERO; // average C:N of the allocated tissues; stays zero when nothing is allocated
   double fcanopy;
 
 // convert par to W m^-2 from cal cm^-2 day^-1, considering daylength (daytime par)
@@ -1464,7 +1431,7 @@ void Tveg45::nupxclm( const int& pdcmnt,
   vegnup  = (availn * ksoil) / soilh2o;
   }
 //  vegnup *= nmax / (kn1[pdcmnt] + vegnup);
-  vegnup *= nmax_grow / (kn1[pdcmnt] + vegnup);
+  vegnup *= getTimestep45().rateToStep( nmax_grow, tem_time::SECONDS_PER_MONTH ) / (kn1[pdcmnt] + vegnup);
   vegnup *= rofT;
   vegnup *= fozone;
   vegnup *= rootmass / (krnup[pdcmnt] + rootmass);
@@ -1543,7 +1510,7 @@ void Tveg45::petsw( const int& pdcmnt,
                  co2,
                  24.0-pdayl );
 
-if (((avlh2o + precip) < 50.0) && phen[pdcmnt] == 2) //BSF COMBO
+if (((avlh2o + precip) < getTimestep45().rateToStep( 50.0, tem_time::SECONDS_PER_MONTH )) && phen[pdcmnt] == 2) //BSF COMBO
   {
     gc = 0.0;
     ngc = 0.0;
@@ -1556,6 +1523,15 @@ if (((avlh2o + precip) < 50.0) && phen[pdcmnt] == 2) //BSF COMBO
   }
 
   dnirr = nirrn * 24./pdayl;
+
+  // potential evapotranspiration: Shuttleworth-Wallace with the FAO-56 reference surface resistance (50 s m-1 day, 200 s m-1 night; Allen et al. 1998)
+  pen.shuttlewallace( pdcmnt, dnirr, lwoutd, lai, taird, vpdd, pdm, 1.0/50.0, snowcover,
+                      pdayl*3600.0, precip, esoilmmmo, elev );
+  potevap = pen.getACTEVAP();
+
+  pen.shuttlewallace( pdcmnt, 0.0, lwoutn, lai, tairn, vpdn, pdm, 1.0/200.0, snowcover,
+                      (24.0-pdayl)*3600.0, precip, esoilmmmo, elev );
+  potevap += pen.getACTEVAP();
 
   dpet = pen.shuttlewallace( pdcmnt,
                 dnirr,
@@ -1572,6 +1548,7 @@ if (((avlh2o + precip) < 50.0) && phen[pdcmnt] == 2) //BSF COMBO
                 elev );
   if(dpet < 0.0) {cout << "dpet = " << dpet << " " << pdcmnt << " " << dnirr << " " << lwoutd << " " << lai << " " << taird << " " << vpdd << " " << pdm << " " << gc << " " << snowcover << " " << pdayl << " " << precip << " " << esoilmmmo << " " << elev << endl;}
 
+  actevap = pen.getACTEVAP();
   pesoilw = pen.getPESOIL();
   pecanw = pen.getPECAN();
   shfluxw = pen.getSHFLUX()*pdayl/24.0;
@@ -1590,6 +1567,7 @@ if (((avlh2o + precip) < 50.0) && phen[pdcmnt] == 2) //BSF COMBO
               esoilmmmo,
               elev );
 
+  actevap += pen.getACTEVAP();
 //  if(npet < 0.0) {cout << "npet = " << npet << " " << pdcmnt << " " << dnirr << " " << lwoutd << " " << lai << " " << taird << " " << vpdd << " " << pdm << " "<< gc << " " << snowcover << " " << pdayl << " " << precip << " " << esoilmmmo << " " << elev << endl;}
   pesoilw += pen.getPESOIL();
   pecanw += pen.getPECAN();

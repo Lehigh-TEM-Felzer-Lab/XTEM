@@ -1,61 +1,48 @@
 /* *************************************************************
-ATMDEPDAT_GDS.H - object to read and write the structure of land
-                  use / land cover cohort data from/to files
+ATMDEPDAT.H - record of the atmospheric nitrogen deposition of a grid
+               cell, read from NetCDF
 
-20060422 - DWK created by modifying lulcdat437.h
-20060422 - DWK changed class Lulcdata43 to class Lulcdata44
-20060422 - DWK deleted public double RAP
-20060422 - DWK added public int disturbflag and public int
-           disturbmonth
-20070105 - TWC changed name to lulcdat45
+Version: XTEM version 4.5
+20241110 Changed: version number 4.5 (only the input and output, configuration and time handling changed).
+20241110 Changed: col and row renamed lon and lat.
+20241109 Changed: The record is read from a NetCDF stream (read) instead of a comma- separated text file
+         (getdel).
 
 ************************************************************* */
 
 #ifndef ATMDEPDAT_GDS_H
 #define ATMDEPDAT_GDS_H
 
+namespace tem::nc { class Stream; }
+
 class Atmdepdat
 {
 
   public:
 
-     Atmdepdat( void );
 
 /* *************************************************************
                       Public Functions
 ************************************************************* */
 
 // read data structure.
-     int getdel( FILE* infile );
-
+     int read( tem::nc::Stream* infile );
 
 /* *************************************************************
                      Public Variables
 ************************************************************* */
 
-     // column or longitude of grid cell (degrees)
-     float col;
+     // longitude of grid cell (degrees)
+     float lon;
 
-     // row or latitude of grid cell (degrees)
-     float row;
+     // latitude of grid cell (degrees)
+     float lat;
 
      // year
      int year;
 
      // ndep value
      float adepval;
-
-
-  private:
-
-/* *************************************************************
-                      Private Variables
-************************************************************* */
-
-     int atmdepend;
-     long curpos;
-     long lagpos;
-
 };
 
 #endif

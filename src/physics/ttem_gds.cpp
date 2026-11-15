@@ -1,64 +1,36 @@
 /* *************************************************************
 ****************************************************************
-TTEM_GDS.CPP - Terrestrial Ecosystem Model Version 4.5
+TTEM45.CPP - Terrestrial Ecosystem Model, XTEM version 4.5
 ****************************************************************
 
-Modifications:
-
-20060126 - DWK created by modifying ttem50b5.cpp
-20060126 - DWK changed include from ttem50b5.h to ttem437.h
-20060126 - DWK changed TTEM50:: to TTEMFLUX::
-20060126 - DWK deleted initialization of snowfile and
-           slayerfile int TTEMFLUX()
-20060126 - DWK added I_FOZONE and I_FINDOZNE to TTEMFLUX()
-20060126 - DWK deleted I_TSOIL, I_DST0, I_DST5, I_DST10,
-           I_DST20, I_DST50, I_DST100, I_DST200, I_FRONTD,
-           I_THAWBE, I_THAWEND, I_THAWPCT, and I_ACTLAYER from
-           TTEMFLUX()
-20060126 - DWK deleted displayOptionalSoilTemp() and
-           getOptionalSoilTemp()
-20060126 - DWK deleted rflog1 from monthlyTransient(),
-           int stepmonth() and getenviron()
-20070105 - TWC changed name to ttem45
-2007 - TWC/BSF Summary of Changes
-       RMLEAF, RMROOT: Delta, displayoptionsEflx, getoptionalEflx,
-                       pcdisplayODEerr, boundcon, and pools at top
-       GC, GS, TRANST, EVAP, INTER: Delta, displayoptionsWflx,
-                       getoptionalWflx, updateyrsummary, and
-                       pools at top
-       KRA, KRB, (remove RMMAX): ECDsetODEstate, getcropecd, getsiteecd,
-                                 writeecd
-       VSM, PCTP: Delta, Massbal, pcdisplayODEerr
-       include tconduct45.ecd
-       boundcon and pcdisplayODEerr also include GC
-       CropDynamics and NatVegDynamics:
-	     Call to SWP routine in soil
-		 Call to EVAP, EET, AVLH2O in soil
-		 Changes to veg.updatedynamics
-		 soil.updatehydrology: replace SM with AVLH2O
-		 soil.updateNLosses: replaces RAIN with RPERC + SPERC
-		 define nirrn, pme, lwout, dum
-	     Cropdynamics: ag.getGDDSEED, ag.getISPERENNIAL
-		 NatVegDynamics: perennial = 1
-	   getenviron: comment out petjh
-	   soil.getNINPUT()massbal:
-	     vnrsrb conditional to keep from getting negative
-		 NINP and NLST calculations
-	   monthlyTransient: VSM and resetEcds
-	   pcdisplayMonth: replace AVLH2O with SM-WILTPT
-	   stepmonth:
-	     seed natural vegetation following disturbance
-		 seed natural vegetation following crop abandonment
-		 kill crops at cold temperatures and allow for perennial crops
-		 changes to crop harvesting: allow for seeding and perennial crops
-		 Define I_VSM
-		 Initialize PRVLAI, LEAFADD, LEAFDROP
-		 ozone effect: no longer use 50% compounding (also baseline ozone
-		   but no longer used)
-		 Remove setRESPQ10
-		 Add soil.setsoil.getNINPUT()NINPUT
-		 setPREVPAR, PRVLAI, LEAFADD, LEAFDROP (and PME, LEAFEFCY no longer used)
-		 yrgc, yrgs, yrtranst, yrevap, yrinter
+Version: XTEM version 4.5
+20241110 Changed: version number 4.5 (only the input and output, configuration and time handling changed).
+20241109 Changed: Parameters are read with tem::yaml::Reader (tem_yaml.h) instead of ProcessXML, because the
+         parameter files are YAML.
+20241109 Changed: The days of a step come from Timestep (ttimestep.h) and arrays are sized MAXCYCLE, so the
+         step is set by run_dt and run_dt_units and is not fixed at twelve months.
+20241109 Changed: Output names are lowercase, to agree with the NetCDF names and the registry in
+         tem_outvars.cpp.
+20241109 Updated: Nitrogen fertilizer of cropland and pasture (xnfertflag) is passed to the soil nitrogen
+         budget.
+20241111 Changed: Wildfire is GDSTEM-FIRE (fire.h, Tfire): the fraction of the cohort burned in the step.
+20241109 Updated: Wildfire (fire.h) acts on the vegetation and the standing dead pool, with occurrence and area
+         as outputs.
+20241109 Updated: The ODE solver (ode_solver) and the soil respiration function (rsoil_method) are chosen at
+         run time.
+20241109 Updated: The state vector holds NUMTEM entries and the new output variables are filled.
+20241109 Fixed: Numbers are parsed strictly: a missing key or a value that is not a number stops the run, with
+         the file and key named (atoi and atof read such values as 0).
+20241109 Changed: Site calibration files are opened with their own Reader (fecd) and the run configuration is
+         held as config (replaces gofile, goname, goyaml).
+20241109 Fixed: The irrigation test uses && where it had a bitwise &.
+20241111 Changed: The fire-interval draws (rco, mco, lco) are those of GDSTEM-FIRE (rand and srand(time)).
+20241109 Fixed: The year-end summary also runs on the last step of a run that ends inside a year.
+20241109 Changed: Annual averages and the update of the annual parameters use CYCLE and not 12; calendar tests
+         use isMONTHSTART, true on the first step of the month at any step length.
+20241109 Fixed: Fertilizer is spread over CYCLE steps (1000 * CYCLE in place of 12000), as nitrogen deposition
+         already was.
+20241110 Changed: Yearly arrays are vectors; allocate() sizes them.
 
 ****************************************************************
 ************************************************************** */
@@ -126,15 +98,13 @@ Modifications:
 
 //#define CALIBRATE_TEM
 
-#define STEP_DAILY
 
-//#define STORM
 
 //#define FIRE
 
+#ifndef TEM_NO_OPENN
 #define OPENN
-//#define TIM_RSOIL
-#define SIB_RSOIL
+#endif
 
 //#define DEBUG_CTEM
 
@@ -147,7 +117,12 @@ Modifications:
 //  initFlag = 0;
 #endif
 
+#include "ttimestep.h"
 #include "ttem_gds.h"
+#if TEM_ENABLE_STORM
+#include <cstdint>
+#include <random>
+#endif
 
 /* **************************************************************
 ************************************************************** */
@@ -181,6 +156,7 @@ double Ttem45::wtol = 0.5;
 // Initialization of adaptive integrator variables
 
 double Ttem45::inittol = 0.01;
+double Ttem45::odedtmax = 0.03333;
 int Ttem45::maxit = 20;
 int Ttem45::maxitmon = 100;
 
@@ -213,6 +189,7 @@ double  Ttem45::b64 =   0.45297271;
 double  Ttem45::b65 =  -0.275;
 
 //PCP code
+int Ttem45::cutstep = -1;
 int Ttem45::rcount = 0;
 int Ttem45::mcount = 0;
 int Ttem45::lcount = 0;
@@ -228,26 +205,24 @@ double Ttem45::lco = (rand()%2 == 1)?(double)(rand()%10+rand()%10+rand()%10)*-1/
 
 Ttem45::Ttem45() : predstr( NUMTEM )
 {
-  string tem_inpfile = "tem_in.txt";
-  
   tol = inittol;
   syint = 1;
+  odesolver = 1;
+  rsoilmethod = 2;
   totyr = -99;
   rheqflag = 0;
   
   delta_count = 0;
   
-  teminfile.open( tem_inpfile.c_str(), ios::in ); 
-  teminfile >> goname;
-  teminfile.close();
+  configfile = "tem_config.yaml"; // the driver replaces it by its first argument
 
 #ifdef CALIBRATE_TEM
-  soilfile = "tsoil45.ecd";
-  rootfile = "trotz45.ecd";
-  vegfile = "tveg45.ecd";
-  mcrvfile = "tmcrv45.ecd";
-  agfile = "ag45.ecd";
-  gcfile = "tconduct45.ecd";
+  soilfile = "tsoil45.yaml";
+  rootfile = "trotz45.yaml";
+  vegfile = "tveg45.yaml";
+  mcrvfile = "tmcrv45.yaml";
+  agfile = "ag45.yaml";
+  gcfile = "tconduct45.yaml";
 
   rheqflag = 0;
   adapttol = 0;
@@ -281,652 +256,656 @@ Ttem45::Ttem45() : predstr( NUMTEM )
 
   // vegetation carbon pools
 
-  predstr.at( I_LEAFC ) = "LEAFC";
+  predstr.at( I_LEAFC ) = "leafc";
 
-  predstr.at( I_SAPWOODC ) = "SAPWOODC";
+  predstr.at( I_SAPWOODC ) = "sapwoodc";
 
-  predstr.at( I_HEARTWOODC ) = "HEARTWOODC";
+  predstr.at( I_HEARTWOODC ) = "heartwoodc";
 
-  predstr.at( I_ROOTC ) = "ROOTC";
+  predstr.at( I_ROOTC ) = "rootc";
 
-  predstr.at( I_SEEDC ) = "SEEDC";
+  predstr.at( I_SEEDC ) = "seedc";
 
-  predstr.at( I_LABILEC ) = "LABILEC";
+  predstr.at( I_LABILEC ) = "labilec";
 
   // reactive soil organic carbon
-  predstr.at( I_SOLC ) = "SOILORGC";
+  predstr.at( I_SOLC ) = "soilorgc";
 
 // Ecosystem nitrogen pools determined by the integrator********
 
   // vegetation structural nitrogen pools
 
-  predstr.at( I_LEAFN ) = "LEAFN";
+  predstr.at( I_LEAFN ) = "leafn";
 
-  predstr.at( I_SAPWOODN ) = "SAPWOODN";
+  predstr.at( I_SAPWOODN ) = "sapwoodn";
 
-  predstr.at( I_HEARTWOODN ) = "HEARTWOODN";
+  predstr.at( I_HEARTWOODN ) = "heartwoodn";
 
-  predstr.at( I_ROOTN ) = "ROOTN";
+  predstr.at( I_ROOTN ) = "rootn";
 
-  predstr.at( I_SEEDN ) = "SEEDN";
+  predstr.at( I_SEEDN ) = "seedn";
 
-  predstr.at( I_LABILEN ) = "LABILEN";
+  predstr.at( I_LABILEN ) = "labilen";
 
 
   // reactive soil organic nitrogen
-  predstr.at( I_SOLN ) = "SOILORGN";
+  predstr.at( I_SOLN ) = "soilorgn";
 
   // soil available nitrogen
-  predstr.at( I_AVLN ) = "AVAILN";
+  predstr.at( I_AVLN ) = "availn";
   
   // ozone damage factor
-  predstr.at( I_FOZONE ) = "FOZONE";
+  predstr.at( I_FOZONE ) = "fozone";
 
   // GPP radiation factor
-  predstr.at( I_FRDL ) = "FRDL";
+  predstr.at( I_FRDL ) = "frdl";
 
   //  GPP CO2 factor
-  predstr.at( I_FCO2 ) = "FCO2";
+  predstr.at( I_FCO2 ) = "fco2";
 
   // GPP temp factor
-  predstr.at( I_TEMP ) = "TEMP";
+  predstr.at( I_TEMP ) = "temp";
 
   // GPP water factor
-  predstr.at( I_FH2O ) = "FH2O";
+  predstr.at( I_FH2O ) = "fh2o";
 
   // GPP ozone factor
-  predstr.at( I_FO3 ) = "FO3";
+  predstr.at( I_FO3 ) = "fo3";
 // Ecosystem water pools determined by the integrator***********
 
   // soil moisture
-  predstr.at( I_SM ) = "SMOIST";
+  predstr.at( I_SM ) = "smoist";
 
   // volumetric soil moisture
-  predstr.at( I_VSM ) = "VSM";
+  predstr.at( I_VSM ) = "vsm";
 
   // soil moisture expressed as percent total porosity
-  predstr.at( I_PCTP ) = "PCTP";
+  predstr.at( I_PCTP ) = "pctp";
 
   // groundwater pool resulting from rainfall
-  predstr.at( I_RGRW ) = "RGRNDH2O";
+  predstr.at( I_RGRW ) = "rgrndh2o";
 
   // groundwater pool resulting from snow melt
-  predstr.at( I_SGRW ) = "SGRNDH2O";
+  predstr.at( I_SGRW ) = "sgrndh2o";
 
   // foliar projected cover
-  predstr.at( I_FPC ) = "FPC";
+  predstr.at( I_FPC ) = "fpc";
 
 
 // Carbon fluxes for ecosystems ********************************
 
   // leaf allocation
-  predstr.at( I_ALLOCLC ) = "ALLOCLC";
+  predstr.at( I_ALLOCLC ) = "alloclc";
 
   // sapwood allocation
-  predstr.at( I_ALLOCSC ) = "ALLOCSC";
+  predstr.at( I_ALLOCSC ) = "allocsc";
 
   // heartwood allocation
-  predstr.at( I_ALLOCHC ) = "ALLOCHC";
+  predstr.at( I_ALLOCHC ) = "allochc";
 
   // root allocation
-  predstr.at( I_ALLOCRC ) = "ALLOCRC";
+  predstr.at( I_ALLOCRC ) = "allocrc";
 
   // seed allocation
-  predstr.at( I_ALLOCSEEDC ) = "ALLOCSEEDC";
+  predstr.at( I_ALLOCSEEDC ) = "allocseedc";
   
   // leaf investment-allocation
-  predstr.at( I_ALLOCILC ) = "ALLOCILC";
+  predstr.at( I_ALLOCILC ) = "allocilc";
 
   // sapwood investment-allocation
-  predstr.at( I_ALLOCISC ) = "ALLOCISC";
+  predstr.at( I_ALLOCISC ) = "allocisc";
 
   // heartwood investment-allocation
-  predstr.at( I_ALLOCIHC ) = "ALLOCIHC";
+  predstr.at( I_ALLOCIHC ) = "allocihc";
 
   // root investment-allocation
-  predstr.at( I_ALLOCIRC ) = "ALLOCIRC";
+  predstr.at( I_ALLOCIRC ) = "allocirc";
 
   // seed investment-allocation
-  predstr.at( I_ALLOCISEEDC ) = "ALLOCISEEDC";
+  predstr.at( I_ALLOCISEEDC ) = "allociseedc";
 
   // GPP not limited by nutrient availability
-  predstr.at( I_INGPP ) = "VEGINGPP";
+  predstr.at( I_INGPP ) = "vegingpp";
 
   // gross primary production
-  predstr.at( I_GPP ) = "GPP";
+  predstr.at( I_GPP ) = "gpp";
 
  // NPP not limited by nutrient availability
-  predstr.at( I_INNPP ) = "VEGINNPP";
+  predstr.at( I_INNPP ) = "veginnpp";
 
   // net primary production
-  predstr.at( I_NPP ) = "NPP";
+  predstr.at( I_NPP ) = "npp";
 
   // gross plant respiration
-  predstr.at( I_GPR ) = "GPR";
+  predstr.at( I_GPR ) = "gpr";
 
   // vegetation maintenance respiration
-  predstr.at( I_RVMNT ) = "RVMAINT";
+  predstr.at( I_RVMNT ) = "rvmaint";
 
   // leaf respiration
-  predstr.at( I_RMLEAF ) = "RMLEAF";
+  predstr.at( I_RMLEAF ) = "rmleaf";
 
   // sapwood respiration
-  predstr.at( I_RMSAPWOOD ) = "RMSAPWOOD";
+  predstr.at( I_RMSAPWOOD ) = "rmsapwood";
 
   // root respiration
-  predstr.at( I_RMROOT ) = "RMROOT";
+  predstr.at( I_RMROOT ) = "rmroot";
 
   // seed respiration
-  predstr.at( I_RMSEED ) = "RMSEED";
+  predstr.at( I_RMSEED ) = "rmseed";
 
   // labile C respiration
-  predstr.at( I_RMLABILE ) = "RMLABILE";
+  predstr.at( I_RMLABILE ) = "rmlabile";
 
 
   // vegetation growth respiration
-  predstr.at( I_RVGRW ) = "RVGRWTH";
+  predstr.at( I_RVGRW ) = "rvgrwth";
 
   // leaf litterfall carbon
-  predstr.at( I_LTRLC ) = "LTRLC";
+  predstr.at( I_LTRLC ) = "ltrlc";
 
   // sapwood litterfall carbon
-  predstr.at( I_LTRSC ) = "LTRSC";
+  predstr.at( I_LTRSC ) = "ltrsc";
 
   // heartwood litterfall carbon
-  predstr.at( I_LTRHC ) = "LTRHC";
+  predstr.at( I_LTRHC ) = "ltrhc";
 
   // root litterfall carbon
-  predstr.at( I_LTRRC ) = "LTRRC";
+  predstr.at( I_LTRRC ) = "ltrrc";
 
   // seed litterfall carbon
-  predstr.at( I_LTRSEEDC ) = "LTRSEEDC";
+  predstr.at( I_LTRSEEDC ) = "ltrseedc";
 
   // heterotrophic respiration
-  predstr.at( I_RH ) = "RH";
+  predstr.at( I_RH ) = "rh";
 
   // Dissolved Organic Carbon
-  predstr.at( I_DOC ) = "DOC";
+  predstr.at( I_DOC ) = "doc";
 
   // Dissolved Organic Nitrgoen
-  predstr.at( I_DON ) = "DON";
+  predstr.at( I_DON ) = "don";
 
 // Nitrogen fluxes for ecosystems determined by the integrator
 
   // leaf nitrogen allocation
-  predstr.at( I_ALLOCLN ) = "ALLOCLN";
+  predstr.at( I_ALLOCLN ) = "allocln";
 
   // sapwood nitrogen allocation
-  predstr.at( I_ALLOCSN ) = "ALLOCSN";
+  predstr.at( I_ALLOCSN ) = "allocsn";
 
   // heartwood nitrogen allocation
-  predstr.at( I_ALLOCHN ) = "ALLOCHN";
+  predstr.at( I_ALLOCHN ) = "allochn";
 
   // root nitrogen allocation
-  predstr.at( I_ALLOCRN ) = "ALLOCRN";
+  predstr.at( I_ALLOCRN ) = "allocrn";
 
   // seed nitrogen allocation
-  predstr.at( I_ALLOCSEEDN ) = "ALLOCSEEDN";
+  predstr.at( I_ALLOCSEEDN ) = "allocseedn";
   
   // leaf nitrogen investment-allocation
-  predstr.at( I_ALLOCILN ) = "ALLOCILN";
+  predstr.at( I_ALLOCILN ) = "allociln";
 
   // sapwood nitrogen investment-allocation
-  predstr.at( I_ALLOCISN ) = "ALLOCISN";
+  predstr.at( I_ALLOCISN ) = "allocisn";
 
   // heartwood nitrogen investment-allocation
-  predstr.at( I_ALLOCIHN ) = "ALLOCIHN";
+  predstr.at( I_ALLOCIHN ) = "allocihn";
 
   // root nitrogen investment-llocation
-  predstr.at( I_ALLOCIRN ) = "ALLOCIRN";
+  predstr.at( I_ALLOCIRN ) = "allocirn";
 
   // seed nitrogen investment-allocation
-  predstr.at( I_ALLOCISEEDN ) = "ALLOCISEEDN";
+  predstr.at( I_ALLOCISEEDN ) = "allociseedn";
 
   // total nitrogen inputs into ecosystem
-  predstr.at( I_NINP ) = "NINPUT";
+  predstr.at( I_NINP ) = "ninput";
 
   // total DOC production into ecosystem
-  predstr.at( I_DOCPROD ) = "DOCPROD";
+  predstr.at( I_DOCPROD ) = "docprod";
 
   // total DOC leaching from ecosystem
-  predstr.at( I_LCHDOC ) = "LCHDOC";
+  predstr.at( I_LCHDOC ) = "lchdoc";
 
   // total DON production into ecosystem
-  predstr.at( I_DONPROD ) = "DONPROD";
+  predstr.at( I_DONPROD ) = "donprod";
 
   // total DON leaching from ecosystem
-  predstr.at( I_LCHDON ) = "LCHDON";
+  predstr.at( I_LCHDON ) = "lchdon";
 
   // total DIN leaching from ecosystem
-     predstr.at( I_LCHDIN ) = "LCHDIN";
+     predstr.at( I_LCHDIN ) = "lchdin";
   
   // nitrogen fertilization
-  predstr.at( I_AGFRTN ) = "AGFERTN";
+  predstr.at( I_AGFRTN ) = "agfertn";
 
   // VEGNUP not limited by carbon availability
-  predstr.at( I_INNUP ) = "VEGINNUP";
+  predstr.at( I_INNUP ) = "veginnup";
 
   // nitrogen uptake by vegetation
-  predstr.at( I_VNUP ) = "VEGNUP";
+  predstr.at( I_VNUP ) = "vegnup";
 
   // nitrogen resorption by leaves
-  predstr.at( I_NRESORBL ) = "NRESORBL";
+  predstr.at( I_NRESORBL ) = "nresorbl";
 
   // nitrogen resorption by stems
-  predstr.at( I_NRESORBS ) = "NRESORBS";
+  predstr.at( I_NRESORBS ) = "nresorbs";
 
   // nitrogen resorption by roots
-  predstr.at( I_NRESORBR ) = "NRESORBR";
+  predstr.at( I_NRESORBR ) = "nresorbr";
 
   // nitrogen resorption by seeds
-  predstr.at( I_NRESORBSEED ) = "NRESORBSEED";
+  predstr.at( I_NRESORBSEED ) = "nresorbseed";
 
   // leaf litterfall nitrogen from vegetation
-  predstr.at( I_LTRLN ) = "LTRLN";
+  predstr.at( I_LTRLN ) = "ltrln";
 
   // sapwood litterfall nitrogen from vegetation
-  predstr.at( I_LTRSN ) = "LTRSN";
+  predstr.at( I_LTRSN ) = "ltrsn";
 
   // heartwood litterfall nitrogen from vegetation
-  predstr.at( I_LTRHN ) = "LTRHN";
+  predstr.at( I_LTRHN ) = "ltrhn";
 
   // root litterfall nitrogen from vegetation
-  predstr.at( I_LTRRN ) = "LTRRN";
+  predstr.at( I_LTRRN ) = "ltrrn";
 
   // seed litterfall nitrogen from vegetation
-  predstr.at( I_LTRSEEDN ) = "LTRSEEDN";
+  predstr.at( I_LTRSEEDN ) = "ltrseedn";
 
   // total nitrogen immobilization
-  predstr.at( I_MNUP ) = "MICRONUP";
+  predstr.at( I_MNUP ) = "micronup";
 
   // net nitrogen mineralization
-  predstr.at( I_NMIN ) = "NETNMIN";
+  predstr.at( I_NMIN ) = "netnmin";
 
   // Total nitrogen losses from ecosystems
-  predstr.at( I_NLST ) = "NLOST";
+  predstr.at( I_NLST ) = "nlost";
 
   // Symbiotic N Fixation
-  predstr.at( I_NFIXS ) = "NFIXS";
+  predstr.at( I_NFIXS ) = "nfixs";
 
   // Nonsymbiotic N Fixation
-  predstr.at( I_NFIXN ) = "NFIXN";
+  predstr.at( I_NFIXN ) = "nfixn";
 
 // Water fluxes determined by the integrator********************
 
   // Irrigation
-  predstr.at( I_AGIRRIG ) = "IRRIGATE";
+  predstr.at( I_AGIRRIG ) = "irrigate";
 
   // Initial estimated evapotranspiration
-  predstr.at( I_INEET ) = "INEET";
+  predstr.at( I_INEET ) = "ineet";
 
   // estimated evapotranspiration
-  predstr.at( I_EET ) = "EET";
+  predstr.at( I_EET ) = "eet";
 
   // percolation of rainwater through soil profile
-  predstr.at( I_RPERC ) = "RPERC";
+  predstr.at( I_RPERC ) = "rperc";
 
   // percolation of snowmelt through soil profile
-  predstr.at( I_SPERC ) = "SPERC";
+  predstr.at( I_SPERC ) = "sperc";
 
   // runoff of rainwater
-  predstr.at( I_RRUN ) = "RRUN";
+  predstr.at( I_RRUN ) = "rrun";
 
   // runoff of snowmelt
-  predstr.at( I_SRUN ) = "SRUN";
+  predstr.at( I_SRUN ) = "srun";
 
   // canopy conductance
-  predstr.at( I_GC ) = "GC";    
+  predstr.at( I_GC ) = "gc";    
   
   // stomatal conductance
-  predstr.at( I_GS ) = "GS";
+  predstr.at( I_GS ) = "gs";
   
   // transpiration
-  predstr.at( I_PECAN ) = "PECAN";    
+  predstr.at( I_PECAN ) = "pecan";    
 
   // soil evaporation
-  predstr.at( I_PESOIL ) = "PESOIL";    
+  predstr.at( I_PESOIL ) = "pesoil";    
 
 // Other ecosystem carbon pools ********************************
 
   // total carbon pool found in ecosystem excluding products
-  predstr.at( I_TOTEC ) = "TOTEC";
+  predstr.at( I_TOTEC ) = "totec";
 
   // total carbon (including products if present)
-  predstr.at( I_TOTC ) = "VEGC";
+  predstr.at( I_TOTC ) = "vegc";
 
 // Other ecosystem nitrogen pools ******************************
 
   // total nitrogen stored in vegetation
-  predstr.at( I_VEGN ) = "VEGN";
+  predstr.at( I_VEGN ) = "vegn";
 
 // Other ecosystem water pools ******************************
 
-  predstr.at( I_SNWPCK ) = "SNOWPACK";  // snowpack
+  predstr.at( I_SNWPCK ) = "snowpack";  // snowpack
   
-  predstr.at( I_AVLW ) = "AVAILH2O";  // plant available soil water
+  predstr.at( I_AVLW ) = "availh2o";  // plant available soil water
 
 // Other carbon fluxes for ecosystems **************************
 
   // net ecosystem production
-  predstr.at( I_NEP ) = "NEP";
+  predstr.at( I_NEP ) = "nep";
 
   // net carbon exchange of ecosystem with atmosphere
-  predstr.at( I_NCE ) = "NCE";
+  predstr.at( I_NCE ) = "nce";
   
   // net carbon exchange of ecosystem with atmosphere entire biome
-  predstr.at( I_NBP ) = "NBP";
+  predstr.at( I_NBP ) = "nbp";
 
   // leaf area index
-  predstr.at( I_LAI ) = "LAI";
+  predstr.at( I_LAI ) = "lai";
 
 // Other water fluxes ******************************************
 
   // potential evapotranspiration
-  predstr.at( I_PET ) = "PET";
+  predstr.at( I_PET ) = "pet";
 
   // infiltration into the soil of water from snowmelt
-  predstr.at( I_SNWINF ) = "SNOWINF";
+  predstr.at( I_SNWINF ) = "snowinf";
 
   // water yield
-  predstr.at( I_WYLD ) = "H2OYIELD";
+  predstr.at( I_WYLD ) = "h2oyield";
 
 // Carbon stocks in products ***********************************
 
   // carbon in agricultural products
-  predstr.at( I_AGPRDC ) = "AGPRODC";
+  predstr.at( I_AGPRDC ) = "agprodc";
 
   // carbon in lawn clippings
-  predstr.at( I_CLIPPINGS ) = "CLIPPINGS";
+  predstr.at( I_CLIPPINGS ) = "clippings";
 
   // carbon pool of products that decompose in 10 years
-  predstr.at( I_PROD10C ) = "PROD10C";
+  predstr.at( I_PROD10C ) = "prod10c";
 
   // carbon pool of products that decompose in 100 years
-  predstr.at( I_PROD100C ) = "PROD100C";
+  predstr.at( I_PROD100C ) = "prod100c";
 
   // carbon in all product pools
-  predstr.at( I_TOTPRDC ) = "TOTPRODC";
+  predstr.at( I_TOTPRDC ) = "totprodc";
 
 
 // Carbon stocks in crop residue and stubble********************
 
   // carbon in crop residue
-  predstr.at( I_RESIDC ) = "RESIDC";
+  predstr.at( I_RESIDC ) = "residc";
 
   // stubble carbon
-  predstr.at( I_AGSTUBC ) = "CRPSTUBC";
+  predstr.at( I_AGSTUBC ) = "crpstubc";
 
 
 // Nitrogen stocks in products *********************************
 
   // nitrogen in agricultural products
-  predstr.at( I_AGPRDN ) = "AGPRODN";
+  predstr.at( I_AGPRDN ) = "agprodn";
 
   // nitrogen pool of products that decompose in 10 years
-  predstr.at( I_PROD10N ) = "PROD10N";
+  predstr.at( I_PROD10N ) = "prod10n";
 
   // nitrogen pool of products that decompose in 100 years
-  predstr.at( I_PROD100N ) = "PROD100N";
+  predstr.at( I_PROD100N ) = "prod100n";
 
   // nitrogen in all product pools
-  predstr.at( I_TOTPRDN ) = "TOTPRODN";
+  predstr.at( I_TOTPRDN ) = "totprodn";
 
 
 // Nitrogen stocks in crop residue and stubble******************
 
   // nitrogen in crop residue
-  predstr.at( I_RESIDN ) = "RESIDN";
+  predstr.at( I_RESIDN ) = "residn";
 
   // stubble nitrogen
-  predstr.at( I_AGSTUBN ) = "CRPSTUBN";
+  predstr.at( I_AGSTUBN ) = "crpstubn";
 
 
 // Carbon fluxes associated with agricultural conversion *******
 
   // carbon loss from the ecosystem during conversion
-  predstr.at( I_CNVRTC ) = "CONVERTC";
+  predstr.at( I_CNVRTC ) = "convertc";
 
   // carbon loss from vegetation during conversion
-  predstr.at( I_VCNVRTC ) = "VCONVRTC";
+  predstr.at( I_VCNVRTC ) = "vconvrtc";
 
   // carbon loss from soils during conversion
-  predstr.at( I_SCNVRTC ) = "SCONVRTC";
+  predstr.at( I_SCNVRTC ) = "sconvrtc";
 
   // carbon associated with slash left after conversion
-  predstr.at( I_SLASHC ) = "SLASHC";
+  predstr.at( I_SLASHC ) = "slashc";
 
-  // carbon and nitrogen associated with CWD
-  predstr.at( I_STANDDEADC ) = "STANDDEADC";
-  predstr.at( I_STANDDEADN ) = "STANDDEADN";
-  predstr.at( I_VOLAC ) = "VOLAC";
-  predstr.at( I_VOLAN ) = "VOLAN";
+  predstr.at( I_STANDDEADC ) = "standdeadc";
+  predstr.at( I_STANDDEADN ) = "standdeadn";
+  predstr.at( I_VOLAC ) = "volac";
+  predstr.at( I_VOLAN ) = "volan";
+
+  // fire occurrence (0 or 1) and area burned (km2) from the fire module
+  predstr.at( I_AREABURN ) = "areaburn";
+  predstr.at( I_POTEVAP ) = "potevap";
+  predstr.at( I_ACTEVAP ) = "actevap";
 
   // carbon flux from ecosystem (NEP+CONVERTC)
-  predstr.at( I_CFLX ) = "CFLUX";
+  predstr.at( I_CFLX ) = "cflux";
 
 
 // Nitrogen fluxes associated with agricultural conversion *****
 
   // nitrogen loss from the ecosystem during conversion
-  predstr.at( I_CNVRTN ) = "CONVERTN";
+  predstr.at( I_CNVRTN ) = "convertn";
 
   // nitrogen loss from vegetation during conversion
-  predstr.at( I_VCNVRTN ) = "VCONVRTN";
+  predstr.at( I_VCNVRTN ) = "vconvrtn";
 
   // nitrogen loss from soils during conversion
-  predstr.at( I_SCNVRTN ) = "SCONVRTN";
+  predstr.at( I_SCNVRTN ) = "sconvrtn";
 
   // nitrogen associated with slash left after conversion
-  predstr.at( I_SLASHN ) = "SLASHN";
+  predstr.at( I_SLASHN ) = "slashn";
 
   // Total organic N mineralized and retained in ecosystem
   //   after disturbance
-  predstr.at( I_NRETNT ) = "NRETENT";
+  predstr.at( I_NRETNT ) = "nretent";
 
   // Vegetation N mineralized and retained in ecosystem
   //   after disturbance
-  predstr.at( I_NVRTNT ) = "NVRETENT";
+  predstr.at( I_NVRTNT ) = "nvretent";
 
   // Soil organic N mineralized and retained in ecosystem
   //   after disturbance
-  predstr.at( I_NSRTNT ) = "NSRETENT";
+  predstr.at( I_NSRTNT ) = "nsretent";
 
 
 // Carbon and nitrogen fluxes to/from products *****************
 
   // carbon loss to formation of agricultural products
-  predstr.at( I_AGFPRDC ) = "AGFPRODC";
+  predstr.at( I_AGFPRDC ) = "agfprodc";
 
   // nitrogen loss to formation of agricultural products
-  predstr.at( I_AGFPRDN ) = "AGFPRODN";
+  predstr.at( I_AGFPRDN ) = "agfprodn";
 
   // carbon loss to crop residue
-  predstr.at( I_FRESIDC ) = "FRESIDC";
+  predstr.at( I_FRESIDC ) = "fresidc";
 
   // nitrogen loss to crop residue
-  predstr.at( I_FRESIDN ) = "FRESIDN";
+  predstr.at( I_FRESIDN ) = "fresidn";
 
   // carbon loss to resulting from decomposition of agricultural
   //   products
-  predstr.at( I_AGPRDFC ) = "AGPRODFC";
+  predstr.at( I_AGPRDFC ) = "agprodfc";
 
   // nitrogen loss resulting from decomposition of agricultural
   //   products
-  predstr.at( I_AGPRDFN ) = "AGPRODFN";
+  predstr.at( I_AGPRDFN ) = "agprodfn";
 
   // carbon loss from crop residue
-  predstr.at( I_RESIDFC ) = "RESIDFC";
+  predstr.at( I_RESIDFC ) = "residfc";
 
   // nitrogen loss from crop residue
-  predstr.at( I_RESIDFN ) = "RESIDFN";
+  predstr.at( I_RESIDFN ) = "residfn";
 
   // carbon loss to formation of products that decompose in
   //  10 years
-  predstr.at( I_PRDF10C ) = "PRDF10C";
+  predstr.at( I_PRDF10C ) = "prdf10c";
 
   // nitrogen loss to formation of products that decompose in
   //   10 years
-  predstr.at( I_PRDF10N ) = "PRDF10N";
+  predstr.at( I_PRDF10N ) = "prdf10n";
 
   // carbon loss resulting from decomposition of PROD10C
-  predstr.at( I_PRD10FC ) = "PRD10FC";
+  predstr.at( I_PRD10FC ) = "prd10fc";
 
   // nitrogen loss resulting from decomposition of PROD10N
-  predstr.at( I_PRD10FN ) = "PRD10FN";
+  predstr.at( I_PRD10FN ) = "prd10fn";
 
   // carbon loss to formation of products that decompose in
   //  100 years
-  predstr.at( I_PRDF100C ) = "PRDF100C";
+  predstr.at( I_PRDF100C ) = "prdf100c";
 
   // nitrogen loss to formation of products that decompose in
   //   100 years
-  predstr.at( I_PRDF100N ) = "PRDF100N";
+  predstr.at( I_PRDF100N ) = "prdf100n";
 
   // carbon loss resulting from decomposition of PROD100C
-  predstr.at( I_PRD100FC ) = "PRD100FC";
+  predstr.at( I_PRD100FC ) = "prd100fc";
 
   // nitrogen loss resulting from decomposition of PROD100N
-  predstr.at( I_PRD100FN ) = "PRD100FN";
+  predstr.at( I_PRD100FN ) = "prd100fn";
 
   // carbon loss to the formation of all products
-  predstr.at( I_TOTFPRDC ) = "TOTFPRDC";
+  predstr.at( I_TOTFPRDC ) = "totfprdc";
 
   // nitrogen loss to the formation of all products
-  predstr.at( I_TOTFPRDN ) = "TOTFPRDN";
+  predstr.at( I_TOTFPRDN ) = "totfprdn";
 
   // carbon loss resulting from decomposition of all products
-  predstr.at( I_TOTPRDFC ) = "TOTPRDFC";
+  predstr.at( I_TOTPRDFC ) = "totprdfc";
 
   // nitrogen loss resulting from decomposition of all products
-  predstr.at( I_TOTPRDFN ) = "TOTPRDFN";
+  predstr.at( I_TOTPRDFN ) = "totprdfn";
 
 
 // Agro-Ecosystem carbon and nitrogen pools *********************
 
   // crop carbon
-  predstr.at( I_CROPC ) = "CROPC";
+  predstr.at( I_CROPC ) = "cropc";
 
   // carbon in natural vegetation
-  predstr.at( I_NATVEGC ) = "NATVEGC";
+  predstr.at( I_NATVEGC ) = "natvegc";
 
   // crop nitrogen
-  predstr.at( I_CROPN ) = "CROPN";
+  predstr.at( I_CROPN ) = "cropn";
 
   // nitrogen in natural vegetation
-  predstr.at( I_NATVEGN ) = "NATVEGN";
+  predstr.at( I_NATVEGN ) = "natvegn";
 
   // crop structural N
-  predstr.at( I_CSTRN ) = "CROPSTRN";
+  predstr.at( I_CSTRN ) = "cropstrn";
 
   // structural N in natural vegetation
-  predstr.at( I_NATSTRN ) = "NATSTRN";
+  predstr.at( I_NATSTRN ) = "natstrn";
 
   // crop labile N
-  predstr.at( I_CSTON ) = "CROPSTON";
+  predstr.at( I_CSTON ) = "cropston";
 
   // labile N stored in natural vegetation
-  predstr.at( I_NATSTON ) = "NATSTON";
+  predstr.at( I_NATSTON ) = "natston";
 
 
 // Crop phenology **********************************************
 
   // leaf area index (LAI) of crops
-  predstr.at( I_CROPLAI ) = "CROPLAI";
+  predstr.at( I_CROPLAI ) = "croplai";
 
   // leaf area index (LAI) of natural vegetation
-  predstr.at( I_NATLAI ) = "NATLAI";
+  predstr.at( I_NATLAI ) = "natlai";
 
   // foliar projected cover (FPC) of crops
-  predstr.at( I_CROPFPC ) = "CROPFPC";
+  predstr.at( I_CROPFPC ) = "cropfpc";
 
   // foliar projected cover (FPC) of natural vegetation
-  predstr.at( I_NATFPC ) = "NATFPC";
+  predstr.at( I_NATFPC ) = "natfpc";
 
 
 // Additional carbon fluxes for agro-ecosystems *****************
 
   // GPP of crops not limited by nutrient availability
-  predstr.at( I_AGINGPP ) = "CRPINGPP";
+  predstr.at( I_AGINGPP ) = "crpingpp";
 
   // GPP of natural vegetation not limited by
   //   nutrient availability
-  predstr.at( I_NATINGPP ) = "NATINGPP";
+  predstr.at( I_NATINGPP ) = "natingpp";
 
   // gross primary production (GPP) of crops
-  predstr.at( I_AGGPP ) = "CROPGPP";
+  predstr.at( I_AGGPP ) = "cropgpp";
 
   // gross primary production of natural vegetation
-  predstr.at( I_NATGPP ) = "NATGPP";
+  predstr.at( I_NATGPP ) = "natgpp";
 
   // NPP of crops not limited by nutrient availability
-  predstr.at( I_AGINNPP ) = "CRPINNPP";
+  predstr.at( I_AGINNPP ) = "crpinnpp";
 
   // NPP of natural vegetation not limited by
   //   nutrient availability
-  predstr.at( I_NATINNPP ) = "NATINNPP";
+  predstr.at( I_NATINNPP ) = "natinnpp";
 
   // net primary production (NPP) of crops
-  predstr.at( I_AGNPP ) = "CROPNPP";
+  predstr.at( I_AGNPP ) = "cropnpp";
 
   // net primary production (NPP) of natural vegetation
-  predstr.at( I_NATNPP ) = "NATNPP";
+  predstr.at( I_NATNPP ) = "natnpp";
 
   // gross plant respiration of crops
-  predstr.at( I_AGGPR ) = "CROPGPR";
+  predstr.at( I_AGGPR ) = "cropgpr";
 
   // gross plant respiration of natural vegetation
-  predstr.at( I_NATGPR ) = "NATGPR";
+  predstr.at( I_NATGPR ) = "natgpr";
 
   // maintenance respiration of crop plants
-  predstr.at( I_AGRVMNT ) = "CRPRMNT";
+  predstr.at( I_AGRVMNT ) = "crprmnt";
 
   // maintenance respiration of natural vegetation
-  predstr.at( I_NATRVMNT ) = "NATRVMNT";
+  predstr.at( I_NATRVMNT ) = "natrvmnt";
 
   // growth respiration of crop plants
-  predstr.at( I_AGRVGRW ) = "CRPRGRW";
+  predstr.at( I_AGRVGRW ) = "crprgrw";
 
   // growth respiration of natural vegetation
-  predstr.at( I_NATRVGRW ) = "NATRGRW";
+  predstr.at( I_NATRVGRW ) = "natrgrw";
 
   // litterfall carbon from crops
-  predstr.at( I_AGLTRC ) = "CROPLTRC";
+  predstr.at( I_AGLTRC ) = "cropltrc";
 
   // litterfall carbon from natural vegetation
-  predstr.at( I_NATLTRC ) = "NATLTRC";
+  predstr.at( I_NATLTRC ) = "natltrc";
 
   // Additional nitrogen fluxes for agro-ecosystems ************
 
   // nitrogen uptake by crops not limited by carbon availability
-  predstr.at( I_AGINNUP ) = "CRPINNUP";
+  predstr.at( I_AGINNUP ) = "crpinnup";
 
   // nitrogen uptake by natural vegetation not limited by carbon
   //   availability
-  predstr.at( I_NATINNUP ) = "NATINNUP";
+  predstr.at( I_NATINNUP ) = "natinnup";
 
   // nitrogen uptake by crops
-  predstr.at( I_AGVNUP ) = "CROPNUP";
+  predstr.at( I_AGVNUP ) = "cropnup";
 
   // nitrogen uptake by natural vegetation
-  predstr.at( I_NATVNUP ) = "NATVNUP";
+  predstr.at( I_NATVNUP ) = "natvnup";
 
   // nitrogen mobilization by crops
-  predstr.at( I_AGVNMBL ) = "CRPNMOBL";
+  predstr.at( I_AGVNMBL ) = "crpnmobl";
 
   // nitrogen mobilization by natural vegetation
-  predstr.at( I_NATVNMBL ) = "NATVNMBL";
+  predstr.at( I_NATVNMBL ) = "natvnmbl";
 
   // nitrogen resorption by crops
-  predstr.at( I_AGVNRSRB ) = "CRPNRSRB";
+  predstr.at( I_AGVNRSRB ) = "crpnrsrb";
 
   // nitrogen resorption by natural vegetation
-  predstr.at( I_NVNRSRB ) = "NVNRSRB";
+  predstr.at( I_NVNRSRB ) = "nvnrsrb";
 
   // litterfall nitrogen from crops
-  predstr.at( I_AGLTRN ) = "CROPLTRN";
+  predstr.at( I_AGLTRN ) = "cropltrn";
 
   //litterfall nitrogen from natural vegetation
-  predstr.at( I_NATLTRN ) = "NATLTRN";
+  predstr.at( I_NATLTRN ) = "natltrn";
 
 
   dbugflg = 0;
@@ -957,13 +936,11 @@ int Ttem45::adapt( const int& numeq,
   double dt;
   int mflag = 0;
   long nintmon = 0;
-  double oldstate[NUMEQ];
-  double tmpdt;
+  double oldstate[NUMTEM];
+  double tmpdt = 0.0; // read when a step is rejected, which can happen before the first step is accepted
   int icnt;
 
-  #ifdef STEP_DAILY
-    dtmax = 0.03333;
-  #endif
+  if( 1 == odesolver ) { dtmax = odedtmax; }
   dt = dtmax;
   for( i = 0; i < numeq; ++i ) { dz1[i] = ZERO; } // reset dz1 if starting a new month 
   for( i = 0; i < numeq; ++i ) { dz4[i] = 1.0; } // reset dz4 if starting a new month 
@@ -977,14 +954,16 @@ int Ttem45::adapt( const int& numeq,
     {
       while( test != ACCEPT )
       {
-	    #ifdef STEP_DAILY
-	      rkbs( numeq, pstate, dt, pdm, pdyr, nmax_grow );
-              test = boundcon( dum2, error, ptol );
-//	     if(pdyr == 1969) {cout << "boundcon test = " << test << " " << pdm << " " << time << " " << nintmon << endl;}
-        #else 
-              rkf( numeq, pstate, dt, pdm, pdyr, nmax_grow );
-              test = boundcon( dum4, error, ptol );
-        #endif
+        if( 1 == odesolver )
+        {
+          rkbs( numeq, pstate, dt, pdm, pdyr, nmax_grow );
+          test = boundcon( dum2, error, ptol );
+        }
+        else
+        {
+          rkf( numeq, pstate, dt, pdm, pdyr, nmax_grow );
+          test = boundcon( dum4, error, ptol );
+        }
 
 //
 //   BSF add check for very small values of dt - necessary for icpx compiler
@@ -1017,15 +996,18 @@ int Ttem45::adapt( const int& numeq,
 
         if( ACCEPT == test )
         {
-          #ifdef STEP_DAILY
+          if( 1 == odesolver )
+          {
             for( i = 0; i < numeq; ++i ) 
             { 
               pstate[i] = dum2[i]; 
               dz1[i] = dz4[i]; // dz1 for the next step has already been calculated
             }
-          #else
+          }
+          else
+          {
             for( i = 0; i < numeq; ++i ) { pstate[i] = dum4[i]; }
-          #endif
+          }
           time += dt;
 
           fpart = modf( (0.01 + (time/(2.0*dt))),&ipart );
@@ -1226,7 +1208,8 @@ void Ttem45::cropDynamics( const int& pdm, const int& pdyr, const double& nmax_g
   veg.aerodynamics( ag.cmnt,
 	                 atms.getWS10() );
 
-  #ifdef TIM_RSOIL   
+  if( 1 == rsoilmethod )
+  {
     prob = 1.0 - exp(-0.005*atms.getPREC() );
     if( prob < ZERO ) { prob = ZERO; }
     
@@ -1236,9 +1219,10 @@ void Ttem45::cropDynamics( const int& pdm, const int& pdyr, const double& nmax_g
     rsoil = 54.65/(prob*surf_wetness + 0.01);
     
     veg.pen.setR_SS( rsoil );
-  #endif
+  }
 
-  #ifdef SIB_RSOIL
+  if( 2 == rsoilmethod )
+  {
     //surf_wetness = 100.0*soil.getVSM()/soil.getPCTPOR(); // assume surface wetness is like bulk moisture content
     prob = 1.0 - exp(-0.005*atms.getPREC() );
     if( prob < ZERO ) { prob = ZERO; }
@@ -1252,7 +1236,7 @@ void Ttem45::cropDynamics( const int& pdm, const int& pdyr, const double& nmax_g
   
 //    veg.pen.setR_SS( exp(8.206 - 4.205*surf_wetness*sqrt(prob)) ); // using modified formulation from SiB2
     veg.pen.setR_SS( exp(8.206 - 4.205*sqrt(surf_wetness*prob)) ); // using formulation from SiB2
-  #endif
+  }
 	                 
   if( (ag.getGROWDD() >= ag.getGDDSEED(ag.cmnt))
       || (1 == ag.getISPERENNIAL(ag.cmnt))) 
@@ -1370,7 +1354,7 @@ nopen = 0;
 
     if(idum == pdm)
     {
-     ag.fertn = ag.fertn*12.0;
+     ag.fertn = ag.fertn*(double)CYCLE;
     }
     else
     {
@@ -1380,9 +1364,9 @@ nopen = 0;
     soil.setNINPUT( soil.getNINPUT() + ag.fertn );
 
     #ifdef OPENN
-      soil.setNINPUT( soil.getNINPUT() + atms.getNDEP()/12000.0 );
-      soil.setSONINP((veg.getNNF(ag.cmnt)*0.102 * (12.0*soil.getEET()/10.0)+ 0.524 ) /(10.0*12.0));
-      veg.setVEGNINP(((1.0-veg.getNNF(ag.cmnt))*0.102 * (12.0*soil.getEET()/10.0)+ 0.524) /(10.0*12.0));
+      soil.setNINPUT( soil.getNINPUT() + atms.getNDEP()/(1000.0*CYCLE) );
+      soil.setSONINP((veg.getNNF(ag.cmnt)*0.102 * ((double)CYCLE*soil.getEET()/10.0)+ 0.524 ) /(10.0*(double)CYCLE));
+      veg.setVEGNINP(((1.0-veg.getNNF(ag.cmnt))*0.102 * ((double)CYCLE*soil.getEET()/10.0)+ 0.524) /(10.0*(double)CYCLE));
 
   labilec_new = y[I_LABILEC]+ dtmax * (veg.getGPP() - veg.getALLOCLC() - veg.getALLOCSC() - veg.getALLOCRC() - veg.getALLOCSEEDC() - veg.getRGRWTH());
   labilen_new = y[I_LABILEN] + dtmax * (veg.getNUPTAKE() + veg.getVEGNINP() - veg.getALLOCLN() - veg.getALLOCSN() - veg.getALLOCRN() - veg.getALLOCSEEDN() + veg.getNRESORBL() + veg.getNRESORBS() + veg.getNRESORBR() + veg.getNRESORBSEED());
@@ -1408,8 +1392,8 @@ if(soilc_new/soiln_new < microbe.getCNSOIL(veg.cmnt)-10.0)
 }
 
 //  Intermediate NFIX
-//      soil.setSONINP((veg.getNNF(veg.cmnt)*0.234 * (12.0*soil.getEET()/10.0)+ 0.172 ) /(10.0*12.0));
-//      veg.setVEGNINP(((1.0-veg.getNNF(veg.cmnt))*0.234 * (12.0*soil.getEET()/10.0)+ 0.172) /(10.0*12.0));
+//      soil.setSONINP((veg.getNNF(veg.cmnt)*0.234 * ((double)CYCLE*soil.getEET()/10.0)+ 0.172 ) /(10.0*(double)CYCLE));
+//      veg.setVEGNINP(((1.0-veg.getNNF(veg.cmnt))*0.234 * ((double)CYCLE*soil.getEET()/10.0)+ 0.172) /(10.0*(double)CYCLE));
 //      if(initFlag == 1) { cout << "cropveg = " << soil.getSONINP() << " " << veg.getVEGNINP() << " " << soil.getEET() << endl;}
     #endif
 
@@ -1434,10 +1418,10 @@ if(soilc_new/soiln_new < microbe.getCNSOIL(veg.cmnt)-10.0)
     // No crop plants exist - set all monthly fluxes to zero
 
     ag.fertn = 0.0;
-    soil.setNINPUT( soil.getNINPUT() + ag.fertn + atms.getNDEP()/12000.0 );
+    soil.setNINPUT( soil.getNINPUT() + ag.fertn + atms.getNDEP()/(1000.0*CYCLE) );
     #ifdef OPENN
       veg.setVEGNINP( ZERO );
-      soil.setSONINP((veg.getNNF(ag.cmnt)*0.102 * (12.0*soil.getEET()/10.0)+ 0.524 ) /(10.0*12.0));
+      soil.setSONINP((veg.getNNF(ag.cmnt)*0.102 * ((double)CYCLE*soil.getEET()/10.0)+ 0.524 ) /(10.0*(double)CYCLE));
     #endif
     veg.updateDynamics( ag.cmnt,
                      soil.getNINPUT(),
@@ -1818,6 +1802,7 @@ void Ttem45::delta( const int& pdm,
                     - microbe.getRH();
 //  ag.setSLASHC(0.0);
 
+
 //  cout << "soil = " << pstate[I_SOLC] << " " << pdstate[I_SOLC] << " " << veg.getLTRLC() << " " << veg.getLTRSC() << " " << veg.getLTRHC() << " " << veg.getLTRRC() << " " << veg.getLTRSEEDC() << " " << ag.getSLASHC() << " " << ag.getSCONVRTFLXC() << " " << microbe.getRH() << " " << microbe.getDOCPROD() << endl;
 
   pdstate[I_DOC] = microbe.getDOCPROD() - soil.getLCHDOC();
@@ -1880,6 +1865,7 @@ void Ttem45::delta( const int& pdm,
                     - ag.getNSRETENT()
                     - microbe.getNETNMIN();
 
+
 //if(initFlag == 1)   cout << "deltasoln = " << pdstate[I_SOLN] << " " << ag.getNSRETENT() << " " << veg.getLTRLN() << " " << veg.getLTRSN() << " " << veg.getLTRHN() << " " << veg.getLTRRN() << " " << veg.getLTRSEEDN() << " " << ag.getSLASHN() << " "  << soil.getSONINP() << " " << microbe.getDONPROD() << " " << ag.getSCONVRTFLXN() << " " << microbe.getNETNMIN() << endl;
 //   if(initFlag == 1) {cout << "soninp = " << soil.getSONINP() << " " << y[I_SOLN] << endl;}
 
@@ -1906,6 +1892,7 @@ void Ttem45::delta( const int& pdm,
                     - ag.getSCONVRTFLXN()
                     - ag.getNSRETENT()
                     - microbe.getNETNMIN();
+
 
   pdstate[I_LABILEN] = veg.getNUPTAKE()
                      - veg.getALLOCLN()
@@ -2839,232 +2826,167 @@ double Ttem45::getOptionalWflx( const int& optflx )
 /* *************************************************************
 ************************************************************* */
 
-void Ttem45::getsitecd( const int& dv, const string&  ecd )
+void Ttem45::loadSiteCalibrations( std::ostream& log )
 {
-
-  fecd[dv].open( ecd.c_str(), ios::in );
-
-  if( !fecd[dv] )
+  const auto& top = config.root();
+  bool loaded[MAXCMNT] = {};
+  int slot = 0;
+  for( const auto& entry : top.items )
   {
-    cerr << endl;
-    cerr << "Cannot open " << ecd << " for site ECD input";
-    cerr << endl;
+    const string& key = entry.first;
+    if( key.size() <= 4 || key.compare( key.size() - 4, 4, "_dat" ) != 0 )
+      continue;
 
+    const auto& file = entry.second;
+    if( file.kind != tem::yaml::Node::Scalar || file.text.empty() )
+    {
+      cerr << key << " needs a site calibration file path" << endl;
+      exit( -1 );
+    }
+    if( slot == MAXCMNT - 1 )
+    {
+      cerr << "Too many *_dat calibration entries. Maximum is " << MAXCMNT - 1 << endl;
+      exit( -1 );
+    }
+    getsitecd( slot, file.text, loaded );
+    ++slot;
+    log << " " << key << " opened " << file.text << " for community " << veg.cmnt << endl;
+  }
+  if( slot == 0 )
+  {
+    cerr << "TEM configuration needs at least one top-level *_dat calibration entry" << endl;
     exit( -1 );
   }
+}
 
-  veg.getXMLsiteRootNode( fecd[dv],
-                          "siteECD",
-                          version,
-                          sitename,
-                          sitecol,
-                          siterow,
-                          developer,
-                          updated );
+void Ttem45::getsitecd( int dv, const string& ecd, bool (&loaded)[MAXCMNT] )
+{
 
-  veg.cmnt = veg.getXMLsiteCommunityNode( fecd[dv],
-                                          "siteECD",
-                                          description );
+  fecd[dv].open( ecd );
 
-  leafcb[veg.cmnt] = veg.getXMLcmntArrayDouble( fecd[dv],
-                                            "siteECD",
-                                            "leafcb",
-                                            veg.cmnt );
+  version = fecd[dv].getOptional( "version" );
+  sitename = fecd[dv].getOptional( "site" );
+  sitecol = fecd[dv].getOptional( "longitude" );
+  siterow = fecd[dv].getOptional( "latitude" );
+  developer = fecd[dv].getOptional( "developedBy" );
+  updated = fecd[dv].getOptional( "updated" );
 
-  sapwoodcb[veg.cmnt] = veg.getXMLcmntArrayDouble( fecd[dv],
-                                          "siteECD",
-                                          "sapwoodcb",
-                                          veg.cmnt );
+  veg.cmnt = fecd[dv].nextCommunity( &description );
+
+  if( veg.cmnt < 1 || veg.cmnt >= MAXCMNT )
+  {
+    cerr << "Invalid community type " << veg.cmnt << " in " << ecd << endl;
+    exit( -1 );
+  }
+  if( loaded[veg.cmnt] )
+  {
+    cerr << "Duplicate calibration for community " << veg.cmnt << " in " << ecd << endl;
+    exit( -1 );
+  }
+  loaded[veg.cmnt] = true;
+
+  leafcb[veg.cmnt] = fecd[dv].getDouble( "leafcb" );
+
+  sapwoodcb[veg.cmnt] = fecd[dv].getDouble( "sapwoodcb" );
 //  cout << "getsitecd = " << veg.cmnt << " " << sapwoodcb[veg.cmnt] << endl;
 
-  heartwoodcb[veg.cmnt] = veg.getXMLcmntArrayDouble( fecd[dv],
-                                        "siteECD",
-                                        "heartwoodcb",
-                                        veg.cmnt );
+  heartwoodcb[veg.cmnt] = fecd[dv].getDouble( "heartwoodcb" );
 
-  rootcb[veg.cmnt] = veg.getXMLcmntArrayDouble( fecd[dv],
-                                          "siteECD",
-                                          "rootcb",
-                                          veg.cmnt );
+  rootcb[veg.cmnt] = fecd[dv].getDouble( "rootcb" );
 
-  seedcb[veg.cmnt] = veg.getXMLcmntArrayDouble( fecd[dv],
-                                        "siteECD",
-                                        "seedcb",
-                                        veg.cmnt );
+  seedcb[veg.cmnt] = fecd[dv].getDouble( "seedcb" );
 
-  labilecb[veg.cmnt] = veg.getXMLcmntArrayDouble( fecd[dv],
-                                          "siteECD",
-                                          "labilecb",
-                                          veg.cmnt );
+  labilecb[veg.cmnt] = fecd[dv].getDouble( "labilecb" );
 
-  leafnb[veg.cmnt] = veg.getXMLcmntArrayDouble( fecd[dv],
-                                            "siteECD",
-                                            "leafnb",
-                                            veg.cmnt );
+  leafnb[veg.cmnt] = fecd[dv].getDouble( "leafnb" );
 
-  sapwoodnb[veg.cmnt] = veg.getXMLcmntArrayDouble( fecd[dv],
-                                          "siteECD",
-                                          "sapwoodnb",
-                                          veg.cmnt );
+  sapwoodnb[veg.cmnt] = fecd[dv].getDouble( "sapwoodnb" );
 
-  heartwoodnb[veg.cmnt] = veg.getXMLcmntArrayDouble( fecd[dv],
-                                        "siteECD",
-                                        "heartwoodnb",
-                                        veg.cmnt );
+  heartwoodnb[veg.cmnt] = fecd[dv].getDouble( "heartwoodnb" );
 
-  rootnb[veg.cmnt] = veg.getXMLcmntArrayDouble( fecd[dv],
-                                          "siteECD",
-                                          "rootnb",
-                                          veg.cmnt );
+  rootnb[veg.cmnt] = fecd[dv].getDouble( "rootnb" );
 
-  seednb[veg.cmnt] = veg.getXMLcmntArrayDouble( fecd[dv],
-                                        "siteECD",
-                                        "seednb",
-                                        veg.cmnt );
+  seednb[veg.cmnt] = fecd[dv].getDouble( "seednb" );
 
-  labilenb[veg.cmnt] = veg.getXMLcmntArrayDouble( fecd[dv],
-                                          "siteECD",
-                                          "labilenb",
-                                          veg.cmnt );
+  labilenb[veg.cmnt] = fecd[dv].getDouble( "labilenb" );
 
-  solcb[veg.cmnt] = veg.getXMLcmntArrayDouble( fecd[dv],
-                                               "siteECD",
-                                               "solcb",
-                                               veg.cmnt );
+  solcb[veg.cmnt] = fecd[dv].getDouble( "solcb" );
 
-  solnb[veg.cmnt] = veg.getXMLcmntArrayDouble( fecd[dv],
-                                               "siteECD",
-                                               "solnb",
-                                               veg.cmnt );
+  solnb[veg.cmnt] = fecd[dv].getDouble( "solnb" );
 
-  avlnb[veg.cmnt] = veg.getXMLcmntArrayDouble( fecd[dv],
-                                               "siteECD",
-                                               "avlnb",
-                                               veg.cmnt );
+  avlnb[veg.cmnt] = fecd[dv].getDouble( "avlnb" );
 
-  veg.setCMAX1B( veg.getXMLcmntArrayDouble( fecd[dv],
-                                            "siteECD",
-                                            "vegcmax1b",
-                                            veg.cmnt ),
+  veg.setCMAX1B( fecd[dv].getDouble( "vegcmax1b" ),
                  veg.cmnt );
 
-  veg.setTAULEAF( veg.getXMLcmntArrayDouble( fecd[dv],
-                                           "siteECD",
-                                           "vegtauleaf",
-                                           veg.cmnt ),
+  veg.setTAULEAF( fecd[dv].getDouble( "vegtauleaf" ),
                 veg.cmnt );
 
-  veg.setTAUSAPWOOD( veg.getXMLcmntArrayDouble( fecd[dv],
-                                         "siteECD",
-                                         "vegtausapwood",
-                                         veg.cmnt ),
+  veg.setTAUSAPWOOD( fecd[dv].getDouble( "vegtausapwood" ),
               veg.cmnt );
 
-  veg.setTAUHEARTWOOD( veg.getXMLcmntArrayDouble( fecd[dv],
-                                       "siteECD",
-                                       "vegtauheartwood",
-                                       veg.cmnt ),
+  veg.setTAUHEARTWOOD( fecd[dv].getDouble( "vegtauheartwood" ),
             veg.cmnt );
 
-  veg.setTAUROOT( veg.getXMLcmntArrayDouble( fecd[dv],
-                                         "siteECD",
-                                         "vegtauroot",
-                                         veg.cmnt ),
+  veg.setTAUROOT( fecd[dv].getDouble( "vegtauroot" ),
               veg.cmnt );
 
-  veg.setTAUSEED( veg.getXMLcmntArrayDouble( fecd[dv],
-                                       "siteECD",
-                                       "vegtauseed",
-                                       veg.cmnt ),
+  veg.setTAUSEED( fecd[dv].getDouble( "vegtauseed" ),
             veg.cmnt );
 
-  veg.setKRA( veg.getXMLcmntArrayDouble( fecd[dv],
-                                         "siteECD",
-                                         "vegkra",
-                                         veg.cmnt ),
+  veg.setKRA( fecd[dv].getDouble( "vegkra" ),
               veg.cmnt );
 
-  microbe.setKDB( veg.getXMLcmntArrayDouble( fecd[dv],
-                                             "siteECD",
-                                             "microbekdb",
-                                             veg.cmnt ),
+  microbe.setKDB( fecd[dv].getDouble( "microbekdb" ),
                   veg.cmnt );
 
-  microbe.setLCCLNC( veg.getXMLcmntArrayDouble( fecd[dv],
-                                                "siteECD",
-                                                "microbelcclnc",
-                                                veg.cmnt ),
+  microbe.setLCCLNC( fecd[dv].getDouble( "microbelcclnc" ),
                      veg.cmnt );
 
-  microbe.setPROPFTOS( veg.getXMLcmntArrayDouble( fecd[dv],
-                                                  "siteECD",
-                                                  "microbepropftos",
-                                                  veg.cmnt ),
+  microbe.setPROPFTOS( fecd[dv].getDouble( "microbepropftos" ),
                        veg.cmnt );
 
-  veg.setNMAX1B( veg.getXMLcmntArrayDouble( fecd[dv],
-                                            "siteECD",
-                                            "vegnmax1b",
-                                            veg.cmnt ),
+  veg.setNMAX1B( fecd[dv].getDouble( "vegnmax1b" ),
                  veg.cmnt );
 
 
-  microbe.setNUPB( veg.getXMLcmntArrayDouble( fecd[dv],
-                                              "siteECD",
-                                              "microbenupb",
-                                              veg.cmnt ),
+  microbe.setNUPB( fecd[dv].getDouble( "microbenupb" ),
                    veg.cmnt );
 
-  soil.setNLOSS( veg.getXMLcmntArrayDouble( fecd[dv],
-                                            "siteECD",
-                                            "soilnloss",
-                                            veg.cmnt ),
+  soil.setNLOSS( fecd[dv].getDouble( "soilnloss" ),
                  veg.cmnt );
 
 //  cout << "soilnloss = " << soil.getNLOSS(veg.cmnt) << " " << veg.cmnt << endl;
 
-  soil.setDENITR( veg.getXMLcmntArrayDouble( fecd[dv],
-                                            "siteECD",
-                                            "soildenitr",
-                                            veg.cmnt ),
+  soil.setDENITR( fecd[dv].getDouble( "soildenitr" ),
                  veg.cmnt );
 
 
-  microbe.setCNSOIL( veg.getXMLcmntArrayDouble( fecd[dv],
-                                                "siteECD",
-                                                "microbecnsoil",
-                                                veg.cmnt ),
+  microbe.setCNSOIL( fecd[dv].getDouble( "microbecnsoil" ),
                      veg.cmnt );
 
 
-  veg.setCNLTR( veg.getXMLcmntArrayDouble( fecd[dv],
-                                     "siteECD",
-                                     "vegcnltr",
-                                     veg.cmnt ),
+  veg.setCNLTR( fecd[dv].getDouble( "vegcnltr" ),
           veg.cmnt );
 
 
-  veg.setO3PARA( veg.getXMLcmntArrayDouble( fecd[dv],
-                                            "siteECD",
-                                            "o3para",
-                                            veg.cmnt ),
+  veg.setO3PARA( fecd[dv].getDouble( "o3para" ),
                  veg.cmnt );
 
-  veg.setO3PARB( veg.getXMLcmntArrayDouble( fecd[dv],
-                                            "siteECD",
-                                            "o3parb",
-                                            veg.cmnt ),
+  veg.setO3PARB( fecd[dv].getDouble( "o3parb" ),
                  veg.cmnt );
 
-  veg.setO3PARC( veg.getXMLcmntArrayDouble( fecd[dv],
-                                            "siteECD",
-                                            "o3parc",
-                                            veg.cmnt ),
+  veg.setO3PARC( fecd[dv].getDouble( "o3parc" ),
                  veg.cmnt );
 
-  veg.endXMLcommunityNode( fecd[dv] );
+  // ignition efficiency of GDSTEM-FIRE (site file), used when veg_fire is 1
+  if( fecd[dv].hasEntry( "igef" ) )
+  {
+    veg.setIGEF( fecd[dv].getDouble( "igef" ), veg.cmnt );
+  }
 
-  fecd[dv].close();
+  fecd[dv].endEntry();
+
 
 };
 
@@ -3523,7 +3445,7 @@ int Ttem45::monthlyTransient( const int& pdyr,
                               const int& pdm,
                               const double& ptol,
                               const int& ichrt,
-                              ofstream& rflog1 )
+                              std::ostream& rflog1 )
 {
   endeq = 0;
   initFlag = 1;
@@ -3538,7 +3460,7 @@ int Ttem45::monthlyTransient( const int& pdyr,
   if ( ag.state == 0
         || (ag.state > 0
         && disturbflag > 0
-        && pdm < (disturbmonth - 1)) )
+        && getTimestep45().getMONTH( pdm ) < (disturbmonth - 1)) )
   {
     y[I_VSM] = soil.updateRootZ( veg.cmnt,
                                  y[I_SM],
@@ -3564,8 +3486,8 @@ int Ttem45::monthlyTransient( const int& pdyr,
   // Update monthly carbon, nitrogen and water dynamics of
   //   terrestrial ecosystem
 
-//  if(pdm == 0) {cout << "cohort = " << ichrt << endl;}
-  stepmonth( pdyr, pdm, intflag, ptol, ichrt, rflog1 );
+//  if(getTimestep45().isYEARSTART( pdm )) {cout << "cohort = " << ichrt << endl;}
+  stepmonth( pdyr, pdm, intflag, ptol, ichrt, rflog1, totyr >= startyr );
 
 
   if( totyr == startyr ) { wrtyr = 0; }
@@ -3682,7 +3604,8 @@ void Ttem45::natvegDynamics( const int& pdm, const int& pdyr, const double& nmax
   veg.aerodynamics( veg.cmnt,
 	                 atms.getWS10() );
 
-  #ifdef TIM_RSOIL   
+  if( 1 == rsoilmethod )
+  {
     prob = 1.0 - exp(-0.005*atms.getPREC() );
     if( prob < ZERO ) { prob = ZERO; }
     
@@ -3692,9 +3615,10 @@ void Ttem45::natvegDynamics( const int& pdm, const int& pdyr, const double& nmax
     rsoil = 54.65/(prob*surf_wetness + 0.01);
     
     veg.pen.setR_SS( rsoil );
-  #endif
+  }
   
-  #ifdef SIB_RSOIL
+  if( 2 == rsoilmethod )
+  {
     //surf_wetness = 100.0*soil.getVSM()/soil.getPCTPOR(); // assume surface wetness is like bulk moisture content
     prob = 1.0 - exp(-0.005*atms.getPREC() );
     if( prob < ZERO ) { prob = ZERO; }
@@ -3720,7 +3644,7 @@ void Ttem45::natvegDynamics( const int& pdm, const int& pdyr, const double& nmax
 //    veg.pen.setR_SS((11.489*exp(-11.67*soil.getVSM()))* exp(8.206 - 4.205*sqrt(surf_wetness*prob)) ); // using formulation from SiB2
 //    veg.pen.setR_SS((78.935*exp(-20.7*soil.getVSM()))* exp(8.206 - 4.205*sqrt(surf_wetness*prob)) ); // using formulation from SiB2
 //    veg.pen.setR_SS((-4.64*log(soil.getVSM())-6.5404)* exp(8.206 - 4.205*sqrt(surf_wetness*prob)) ); // using formulation from SiB2
-  #endif
+  }
 	                 
   veg.pen.hydraulics( veg.cmnt,
                       veg.getPHEN( veg.cmnt ),
@@ -3841,9 +3765,9 @@ nopen = 0;
 
 #ifdef OPENN
 //  soil.setNINPUT((0.102 * (12.0*soil.getEET()/10.0)+ 0.524 )/(10.0*12.0));
-  soil.setNINPUT(soil.getNINPUT() + atms.getNDEP()/12000.0);
-  soil.setSONINP((veg.getNNF(veg.cmnt)*0.102 * (12.0*soil.getEET()/10.0)+ 0.524 ) /(10.0*12.0));
-  veg.setVEGNINP(((1.0-veg.getNNF(veg.cmnt))*0.102 * (12.0*soil.getEET()/10.0)+ 0.524) /(10.0*12.0));
+  soil.setNINPUT(soil.getNINPUT() + atms.getNDEP()/(1000.0*CYCLE));
+  soil.setSONINP((veg.getNNF(veg.cmnt)*0.102 * ((double)CYCLE*soil.getEET()/10.0)+ 0.524 ) /(10.0*(double)CYCLE));
+  veg.setVEGNINP(((1.0-veg.getNNF(veg.cmnt))*0.102 * ((double)CYCLE*soil.getEET()/10.0)+ 0.524) /(10.0*(double)CYCLE));
 
   labilec_new = y[I_LABILEC]+ dtmax * (veg.getGPP() - veg.getALLOCLC() - veg.getALLOCSC() - veg.getALLOCRC() - veg.getALLOCSEEDC() - veg.getRGRWTH());
   labilen_new = y[I_LABILEN] + dtmax * (veg.getNUPTAKE() + veg.getVEGNINP() - veg.getALLOCLN() - veg.getALLOCSN() - veg.getALLOCRN() - veg.getALLOCSEEDN() + veg.getNRESORBL() + veg.getNRESORBS() + veg.getNRESORBR() + veg.getNRESORBSEED());
@@ -3875,8 +3799,8 @@ if(soilc_new/soiln_new < microbe.getCNSOIL(veg.cmnt)-10.0)
 
 
 // intermediate Nfix
-//  soil.setSONINP((veg.getNNF(veg.cmnt)*0.234 * (12.0*soil.getEET()/10.0)+ 0.172 ) /(10.0*12.0));
-//  veg.setVEGNINP(((1.0-veg.getNNF(veg.cmnt))*0.234 * (12.0*soil.getEET()/10.0)+ 0.172) /(10.0*12.0));
+//  soil.setSONINP((veg.getNNF(veg.cmnt)*0.234 * ((double)CYCLE*soil.getEET()/10.0)+ 0.172 ) /(10.0*(double)CYCLE));
+//  veg.setVEGNINP(((1.0-veg.getNNF(veg.cmnt))*0.234 * ((double)CYCLE*soil.getEET()/10.0)+ 0.172) /(10.0*(double)CYCLE));
 
 //  if(veg.cmnt == 1 || veg.cmnt == 15) { veg.setVEGNINP(0.0); }
   if(veg.cmnt == 1 || ag.state == 7) { veg.setVEGNINP(0.0); }
@@ -3884,7 +3808,7 @@ if(soilc_new/soiln_new < microbe.getCNSOIL(veg.cmnt)-10.0)
 #endif
 //
 //if(initFlag == 1) {cout << "ori = " << soil.getSONINP() << endl;}
-  if ( disturbflag > 1 && pdm == (disturbmonth -1) )
+  if ( disturbflag > 1 && getTimestep45().isMONTHSTART( pdm, disturbmonth - 1 ) )
   {
     // set monthly vegetation fluxes to zero
     veg.resetMonthlyFluxes();
@@ -4322,7 +4246,7 @@ void Ttem45::pcdisplayMonth( const int& dyr, const int& pdm )
   for( iout = 0; iout < ESY; ++iout ) 
   { 
     outevar[iout] = getOptionalEflx( sey[iout] );
-    if(pdm == 0)
+    if(getTimestep45().isYEARSTART( pdm ))
     {
       outevarsum[iout] = 0.0;
       outevaravg[iout] = 0.0;
@@ -4331,7 +4255,7 @@ void Ttem45::pcdisplayMonth( const int& dyr, const int& pdm )
     }
     
     outevarsum[iout] += outevar[iout];
-    outevaravg[iout] += outevar[iout]/12.0;
+    outevaravg[iout] += outevar[iout]/(double)CYCLE;
     if( outevar[iout] > outevarmax[iout] ) { outevarmax[iout] = outevar[iout]; }
     if( outevar[iout] < outevarmin[iout] ) { outevarmin[iout] = outevar[iout]; }
   }
@@ -4339,7 +4263,7 @@ void Ttem45::pcdisplayMonth( const int& dyr, const int& pdm )
   for( iout = 0; iout < WSY; ++iout ) 
   { 
     outwvar[iout] = getOptionalWflx( swy[iout] );
-    if(pdm == 0)
+    if(getTimestep45().isYEARSTART( pdm ))
     {
       outwvarsum[iout] = 0.0;
       outwvaravg[iout] = 0.0;
@@ -4348,7 +4272,7 @@ void Ttem45::pcdisplayMonth( const int& dyr, const int& pdm )
     }
     
     outwvarsum[iout] += outwvar[iout];
-    outwvaravg[iout] += outwvar[iout]/12.0;
+    outwvaravg[iout] += outwvar[iout]/(double)CYCLE;
     if( outwvar[iout] > outwvarmax[iout] ) { outwvarmax[iout] = outwvar[iout]; }
     if( outwvar[iout] < outwvarmin[iout] ) { outwvarmin[iout] = outwvar[iout]; }
   }
@@ -4416,7 +4340,7 @@ void Ttem45::pcdisplayMonth( const int& dyr, const int& pdm )
                                                                                                                                    outwvar[6],
                                                                                                                                           outwvar[7] );
                                                                                                                                           
-  if( pdm == 11 )
+  if( getTimestep45().isYEAREND( pdm ) )
   {
     move(15,1);
     printw( " SUM   %7.0lf %7.0lf %7.1lf %7.1lf %7.1lf %7.1lf %7.1lf %7.2lf %7.2lf %7.2lf %7.0lf %7.0lf %7.0lf %7.1lf %7.1lf %7.1lf %7.2lf %7.2lf",
@@ -4806,12 +4730,80 @@ void Ttem45::step( const int& numeq,
 /* *************************************************************
 ************************************************************** */
 
+#if TEM_ENABLE_STORM
+void Ttem45::setStormReturnIntervals( double lon, double lat, double storm, double hurricane )
+{
+  for( double years : { storm, hurricane } )
+  {
+    if( !std::isfinite( years ) || ( years != 0.0 && years < 1.0 ) )
+    {
+      std::cerr << "Storm return intervals must be zero or at least one year at "
+                << lon << ", " << lat << std::endl;
+      std::exit( -1 );
+    }
+  }
+  stormLon = lon;
+  stormLat = lat;
+  stormYears = storm;
+  hurricaneYears = hurricane;
+}
+
+void Ttem45::applyStormDisturbance( int cohort, std::ostream& log )
+{
+  if( ( stormYears == 0.0 && hurricaneYears == 0.0 ) || ag.state != 0 )
+    return;
+
+  const int community = veg.cmnt;
+  if( community != 4 && community != 5 && community != 6 &&
+      community != 10 && community != 11 && community != 12 )
+    return;
+
+  // Use cell, year and cohort so rank assignment and restart do not change the draws.
+  std::seed_seq seed{ static_cast<std::uint32_t>( std::lround( ( stormLon + 180.0 ) * 1e6 ) ),
+                      static_cast<std::uint32_t>( std::lround( ( stormLat + 90.0 ) * 1e6 ) ),
+                      static_cast<std::uint32_t>( totyr ),
+                      static_cast<std::uint32_t>( cohort ) };
+  std::mt19937 rng( seed );
+  const double stormDraw = std::generate_canonical<double, 53>( rng );
+  const double hurricaneDraw = std::generate_canonical<double, 53>( rng );
+
+  const auto damage = [&]( const char* event, double leaf, double wood )
+  {
+    log << event << " in " << totyr << " at " << stormLon << ", " << stormLat
+        << " cohort " << cohort + 1 << '\n';
+    ag.setVCONVERT( 0.0 );
+    ag.setSCONVERT( 0.0 );
+    ag.setPROD10PAR( 0.0 );
+    ag.setPROD100PAR( 0.0 );
+    stormoccur = 1;
+    ag.setNATSEEDC( y[I_SEEDC] );
+    ag.setNATSEEDSTON( y[I_SEEDN] );
+    ag.standingdead( community,
+                     ag.getSLASHC() + leaf * y[I_LEAFC] + wood * y[I_ROOTC],
+                     ag.getSLASHN() + leaf * y[I_LEAFN] + wood * y[I_ROOTN],
+                     wood * ( y[I_SAPWOODC] + y[I_HEARTWOODC] + y[I_LABILEC] ),
+                     wood * ( y[I_SAPWOODN] + y[I_HEARTWOODN] + y[I_LABILEN] ), 0.0 );
+    for( int i : { I_LEAFC, I_LEAFN } )
+      prevy[i] = y[i] *= 1.0 - leaf;
+    for( int i : { I_LABILEC, I_LABILEN, I_SAPWOODC, I_SAPWOODN,
+                   I_HEARTWOODC, I_HEARTWOODN, I_ROOTC, I_ROOTN } )
+      prevy[i] = y[i] *= 1.0 - wood;
+  };
+
+  if( stormYears > 0.0 && stormDraw < 1.0 / stormYears )
+    damage( "Tropical storm", 0.07, 0.04 );
+  if( hurricaneYears > 0.0 && hurricaneDraw < 1.0 / hurricaneYears )
+    damage( "Hurricane", 0.20, 0.11 );
+}
+#endif
+
 int Ttem45::stepmonth( const int& pdyr,
                        const int& pdm,
                        int& intflag,
                        const double& ptol,
                        const int& ichrt,
-                       ofstream& rflog1)
+                       std::ostream& rflog1,
+                       bool transient )
 {
 
   int mintflag;
@@ -4822,19 +4814,18 @@ int Ttem45::stepmonth( const int& pdyr,
   double dleaf, dwood;
   double sonp,availnp,vegnp,donpout,dinpout,ndif;
 
-  int tempret_storm = (storm == 0)?0:(1/storm);
-  int tempret_hurr = (hurr == 0)?0:(1/hurr);
   double rhmoist,dq10;
-  double firemag, vegmax, replace;
+  double areaburn = 0.0;
 
   double cwdloss=0.0;
 
    disturbmonth = 1;
 //  cout << "entering stepmonth " << pdyr << " " << pdm << " " << veg.cmnt << " " << ag.cmnt << " " << ag.state << " " << y[I_LEAFC] << " " << y[I_LAI] << endl;
 //cout << "entering stepmonth" << " " << y[I_SAPWOODC] << " " << veg.cmnt << " " << ag.cmnt << " " << sapwoodcb[11] << " " << sapwoodcb[4] << endl;
-  srand(time(NULL)*rand()); //PCP code (this statement was here I just modified it a little.)
 
-if((pdyr == 0 || pdyr == 1) and pdm == 0) {
+  srand(time(NULL)*rand()); //PCP code (as in GDSTEM-FIRE)
+
+if((pdyr == 0 || pdyr == 1) and getTimestep45().isYEARSTART( pdm )) {
  rco = (rand()%2 == 1)?(double)(rand()%10+rand()%10+rand()%10)*-1/10:(double)(rand()%10+rand()%10+rand()%10)/10;
  mco = (rand()%2 == 1)?(double)(rand()%10+rand()%10+rand()%10)*-1/10:(double)(rand()%10+rand()%10+rand()%10)/10;
  lco = (rand()%2 == 1)?(double)(rand()%10+rand()%10+rand()%10)*-1/10:(double)(rand()%10+rand()%10+rand()%10)/10;
@@ -4845,12 +4836,12 @@ if((pdyr == 0 || pdyr == 1) and pdm == 0) {
  
 //cout << "entering stepmonth " << veg.cmnt << " " << pdyr << " " << pdm << " " << y[I_GPP] << endl;
 
-  avgfac = 1.0/(12.0*(veg.getTAULEAF( veg.cmnt ) + veg.getTAUSAPWOOD( veg.cmnt ) 
+  avgfac = 1.0/((double)CYCLE*(veg.getTAULEAF( veg.cmnt ) + veg.getTAUSAPWOOD( veg.cmnt ) 
            + veg.getTAUROOT( veg.cmnt ))/3.0);
   avgfac = exp(-avgfac);
-  if(pdm == 0) { mxeet = 0.0; }
+  if(getTimestep45().isYEARSTART( pdm )) { mxeet = 0.0; }
 
-  if((pdyr == 1 || pdyr == 0) && pdm == 0 && initFlag == 0)
+  if((pdyr == 1 || pdyr == 0) && getTimestep45().isYEARSTART( pdm ) && initFlag == 0)
   {
   ag.setSTANDDEADC(0.0);
   ag.setSTANDDEADN(0.0);
@@ -4860,6 +4851,31 @@ if((pdyr == 0 || pdyr == 1) and pdm == 0) {
   stormoccur = 0;
  }
   
+  // Wildfire (GDSTEM-FIRE): the fraction of the cohort burned in the step; no fire during the equilibration
+  fire.setBURNED_AREA( 0.0 );
+
+#if TEM_ENABLE_FIRE
+  if( 1 == fire.enabled && 1 == initFlag )
+  {
+    if( veg.getIGEF( veg.cmnt ) <= MISSING + 1.0 || veg.getFSR( veg.cmnt ) <= MISSING + 1.0 || veg.getFD( veg.cmnt ) <= MISSING + 1.0 )
+    {
+      cerr << endl << "veg_fire is 1, but community " << veg.cmnt << " of the vegetation file (vegecd) has no igef, fsr and fd" << endl;
+      exit( -1 );
+    }
+
+    // the year of the land cover (the first year of the transient run is pdyr 1)
+    const int iy = std::max( 0, std::min( (int) ag.lwft.size() - 1, pdyr - 1 ) );
+
+    ni = fire.ignitions( ig[pdm], pop, lon, veg.getIGEF( veg.cmnt ), ag.lwft[iy], ag.forarea[iy] );
+
+    const double rh = atms.getVPR() / (atms.getVPR() + atms.getVPDD()) * 100.0;
+
+    areaburn = fire.fireburn( veg.getPOTVEG(), veg.getVEGC(), y[I_VSM], atms.getWS10(), atms.getTAIR(),
+                              y[I_ROOTC], y[I_RH], y[I_RMROOT], rh, ni, gdp, pop, elev,
+                              veg.getFSR( veg.cmnt ), veg.getFD( veg.cmnt ), ag.lwft[iy] );
+  }
+#endif // TEM_ENABLE_FIRE
+
   // avgfac = exp(-1 / average lifetime of leaves, stem, and roots, in months)
   
  // Reset all monthly fluxes to zero
@@ -4976,11 +4992,7 @@ if((pdyr == 0 || pdyr == 1) and pdm == 0) {
 
   // Implement disturbance effects
 
-//if(initFlag == 1) {cout << "disturb = " << disturbflag << " " << disturbmonth << " " << veg.cmnt << " " << ichrt << " " << pdyr << " " << pdm << endl;}
-
-// if( disturbflag ==  1 && pdm == (disturbmonth-1)) // agriculture
-// if( disturbflag ==  1 && pdm == (disturbmonth-1) && veg.srccmnt != 17 && veg.srccmnt != 18 && veg.srccmnt != 19 && veg.srccmnt != 21 && veg.srccmnt != 15 && veg.srccmnt != 16 ) // agriculture
- if( disturbflag ==  1 && pdm == (disturbmonth-1) ) // agriculture
+ if( disturbflag ==  1 && getTimestep45().isMONTHSTART( pdm, disturbmonth - 1 ) ) // agriculture
   {
     distmnthcnt = 1;
  
@@ -5093,7 +5105,7 @@ if((pdyr == 0 || pdyr == 1) and pdm == 0) {
 //    }
   }
 
-else if ( disturbflag ==  2 && pdm == (disturbmonth-1)) // timber harvest clearcut
+else if ( disturbflag ==  2 && getTimestep45().isMONTHSTART( pdm, disturbmonth - 1 )) // timber harvest clearcut
   {
     distmnthcnt = 1;
     timber = 1.0;
@@ -5164,36 +5176,27 @@ else if ( disturbflag ==  2 && pdm == (disturbmonth-1)) // timber harvest clearc
     prevy[I_HEARTWOODN] = y[I_HEARTWOODN] = (1. - timber)*y[I_HEARTWOODN];
    }
 
-else if ( disturbflag ==  3 && pdm == (disturbmonth-1)) // fire, mid intensity
+else if( ( 3 == disturbflag && getTimestep45().isMONTHSTART( pdm, disturbmonth - 1 ) ) || areaburn > 0.0 ) // fire, mid intensity
   {
-//  ADDED PCP
-//    ag.setVCONVERT(1.0);
-//    Based on Fire Regime Table
-//
-    ag.setVCONVERT(0.0124);
-//    ag.setSCONVERT(0.025);
+    // Prescribed fire (disturbflag 3) burns the whole cohort; wildfire (GDSTEM-FIRE) burns the fraction areaburn of it
+    if( 3 == disturbflag && getTimestep45().isMONTHSTART( pdm, disturbmonth - 1 ) ) { areaburn = 1.0; }
+
+    ag.setVCONVERT(0.0124 * areaburn);
     ag.setSCONVERT(0.0);
-    fireoccur = 1;
 //  cwdloss midrange value from Meigs et al. 2009
-    cwdloss = 0.24;
+    cwdloss = 0.24 * areaburn;
 //
        distmnthcnt = 1;
        firemnthcnt = 1;
-//       dleaf = 0.5;
-//       dwood = 0.5;
-       dleaf = 1.0;
-       dwood = 1.0;
        ag.setNATSEEDC (y[I_SEEDC] );
        ag.setNATSEEDSTON (y[I_SEEDN] );
 
        ag.conversion( veg.cmnt,
-              dwood*y[I_ROOTC],
-              dwood*y[I_ROOTN],
-//              dwood*(y[I_SAPWOODC]+y[I_HEARTWOODC]+y[I_LABILEC]) + dleaf*y[I_LEAFC],
-              dwood*(y[I_SAPWOODC]+y[I_HEARTWOODC]+y[I_LABILEC]) + y[I_LEAFC]*(dleaf/ag.getVCONVERT()),
-//              dwood*(y[I_SAPWOODN]+y[I_HEARTWOODN]) + dleaf*y[I_LEAFN],
-              dwood*(y[I_SAPWOODN]+y[I_HEARTWOODN]) + y[I_LEAFN]*(dleaf/ag.getVCONVERT()),
-              dwood* y[I_LABILEN],
+              y[I_ROOTC],
+              y[I_ROOTN],
+              (y[I_SAPWOODC]+y[I_HEARTWOODC]+y[I_LABILEC])+areaburn *y[I_LEAFC]/ag.getVCONVERT(),
+              (y[I_SAPWOODN]+y[I_HEARTWOODN])+areaburn*y[I_LEAFN]/ag.getVCONVERT(),
+              y[I_LABILEN],
               y[I_SOLC],
               y[I_SOLN],
               cwdloss,
@@ -5202,29 +5205,26 @@ else if ( disturbflag ==  3 && pdm == (disturbmonth-1)) // fire, mid intensity
 ////  overwrite the slash with same as above but add to standing dead
 ////
       ag.standingdead( veg.cmnt,
-                      dwood*y[I_ROOTC],
-                      dwood*y[I_ROOTN],
-//                      (1.0-ag.getVCONVERT())*(dwood*(y[I_SAPWOODC]+y[I_HEARTWOODC]+y[I_LABILEC]) + dleaf*y[I_LEAFC]),
-                      (1.0-ag.getVCONVERT())*(dwood*(y[I_SAPWOODC]+y[I_HEARTWOODC]+y[I_LABILEC])),
-//                      (1.0-ag.getVCONVERT())*(dwood*(y[I_SAPWOODN]+y[I_HEARTWOODN]+y[I_LABILEN]) + dleaf*y[I_LEAFN]),
-                      (1.0-ag.getVCONVERT())*(dwood*(y[I_SAPWOODN]+y[I_HEARTWOODN]+y[I_LABILEN])),
+                      y[I_ROOTC],
+                      y[I_ROOTN],
+                      (areaburn-ag.getVCONVERT())*(y[I_SAPWOODC]+y[I_HEARTWOODC]+y[I_LABILEC]),
+                      (areaburn-ag.getVCONVERT())*(y[I_SAPWOODN]+y[I_HEARTWOODN]+y[I_LABILEN]),
                       cwdloss);
 
-
-      prevy[I_LABILEC] = y[I_LABILEC] = (1. - dwood)*y[I_LABILEC];
-      prevy[I_LABILEN] = y[I_LABILEN] = (1. - dwood) * y[I_LABILEN];
-      prevy[I_LEAFC] = y[I_LEAFC] = (1. - dleaf)*y[I_LEAFC];
+      prevy[I_LABILEC] = y[I_LABILEC] = (1 - areaburn)*y[I_LABILEC];
+      prevy[I_LABILEN] = y[I_LABILEN] =  (1 - areaburn)*y[I_LABILEN];
+      prevy[I_LEAFC] = y[I_LEAFC] = (1 - areaburn)*y[I_LEAFC];
       y[I_LAI] = y[I_LEAFC] * veg.getSLA(veg.cmnt);
-      prevy[I_LEAFN] = y[I_LEAFN] = (1. - dleaf)*y[I_LEAFN];
-      prevy[I_SAPWOODC] = y[I_SAPWOODC] = (1. - dwood)*y[I_SAPWOODC];
-      prevy[I_SAPWOODN] = y[I_SAPWOODN] = (1. - dwood)*y[I_SAPWOODN];
-      prevy[I_HEARTWOODC] = y[I_HEARTWOODC] = (1. - dwood)*y[I_HEARTWOODC];
-      prevy[I_HEARTWOODN] = y[I_HEARTWOODN] = (1. - dwood)*y[I_HEARTWOODN];
-      prevy[I_ROOTC] = y[I_ROOTC] =  (1. - dwood)*y[I_ROOTC];
-      prevy[I_ROOTN] = y[I_ROOTN] =  (1. - dwood)*y[I_ROOTN ];
+      prevy[I_LEAFN] = y[I_LEAFN] = (1 - areaburn)*y[I_LEAFN];
+      prevy[I_SAPWOODC] = y[I_SAPWOODC] = (1 - areaburn)*y[I_SAPWOODC];
+      prevy[I_SAPWOODN] = y[I_SAPWOODN] = (1 - areaburn)*y[I_SAPWOODN];
+      prevy[I_HEARTWOODC] = y[I_HEARTWOODC] = (1 - areaburn)*y[I_HEARTWOODC];
+      prevy[I_HEARTWOODN] = y[I_HEARTWOODN] = (1 - areaburn)*y[I_HEARTWOODN];
+      prevy[I_ROOTC] = y[I_ROOTC] =  (1 - areaburn)*y[I_ROOTC];
+      prevy[I_ROOTN] = y[I_ROOTN] =  (1 - areaburn)*y[I_ROOTN];
   }
 
-else if ( disturbflag ==  4 && pdm == (disturbmonth-1)) //hurricane-strength storm
+else if ( disturbflag ==  4 && getTimestep45().isMONTHSTART( pdm, disturbmonth - 1 )) //hurricane-strength storm
   {
 //  ADDED PCP
     ag.setVCONVERT(0.0);
@@ -5275,323 +5275,14 @@ else if ( disturbflag ==  4 && pdm == (disturbmonth-1)) //hurricane-strength sto
       prevy[I_ROOTN] = y[I_ROOTN] = 0.01*y[I_ROOTN]; 
   }
 
-#ifdef STORM
-
-//  stormoccur = 0;
-//  if(initFlag == 1 && pdm == 7 && pdyr > 1 && (veg.cmnt == 5 || veg.cmnt == 6 || veg.cmnt == 4 || veg.cmnt == 10 || veg.cmnt == 11 || veg.cmnt == 12) && ag.state == 0)
-  if(pdm == 7 && pdyr > 1 && (veg.cmnt == 5 || veg.cmnt == 6 || veg.cmnt == 4 || veg.cmnt == 7 || veg.cmnt == 13 || veg.cmnt == 14) && ag.state == 0)
-  {
-
-
-   if(tempret_storm != 0 && ((int)rand() % (tempret_storm -1)) == 1)
-  {
-  cout << "tropical storm " << pdyr << endl;
-  ag.setVCONVERT(0.0);
-  ag.setSCONVERT(0.0);
-  ag.setPROD10PAR(0.0);
-  ag.setPROD100PAR(0.0);
-  stormoccur = 1;
-  cwdloss = 0.0;
-
-  ag.setNATSEEDC (y[I_SEEDC] );
-  ag.setNATSEEDSTON (y[I_SEEDN] );
-
-//
-//  Values based on Gresham 1991 and Francis and Gilespie, 1993
-//
-      ag.standingdead( veg.cmnt,
-                 0.07*y[I_LEAFC]+0.04*(y[I_ROOTC]),
-                 0.07*y[I_LEAFN]+0.04*(y[I_ROOTN]),
-                 (0.04*(y[I_SAPWOODC]+y[I_HEARTWOODC]+y[I_LABILEC])),
-                 (0.04*(y[I_SAPWOODN]+y[I_HEARTWOODN]+y[I_LABILEN])),
-                  cwdloss );
-
-  prevy[I_LABILEC] = y[I_LABILEC] = (1. - 0.04)*y[I_LABILEC]; //for now, 0.5 of hurricane value
-  prevy[I_LABILEN] = y[I_LABILEN] = (1. -  0.04)*y[I_LABILEN];
-  prevy[I_LEAFC] = y[I_LEAFC] = (1. - 0.07)*y[I_LEAFC];
-  y[I_LAI] = y[I_LEAFC] * veg.getSLA(veg.cmnt);
-  prevy[I_LEAFN] = y[I_LEAFN] = (1. - 0.07)*y[I_LEAFN];
-  prevy[I_SAPWOODC] = y[I_SAPWOODC] = (1. - 0.04)*y[I_SAPWOODC];
-  prevy[I_SAPWOODN] = y[I_SAPWOODN] = (1. - 0.04)*y[I_SAPWOODN];
-  prevy[I_HEARTWOODC] = y[I_HEARTWOODC] = (1. - 0.04)*y[I_HEARTWOODC];
-  prevy[I_HEARTWOODN] = y[I_HEARTWOODN] = (1. - 0.04)*y[I_HEARTWOODN];
-  prevy[I_ROOTC] = y[I_ROOTC] = (1. - 0.04)*y[I_ROOTC];
-  prevy[I_ROOTN] = y[I_ROOTN] = (1. - 0.04)*y[I_ROOTN];
-  }    
-
-   if(tempret_hurr != 0 && ((int)rand() % (tempret_hurr -1)) == 1)
-  {
-  cout << "hurricane " << " " << pdyr << endl;
-  ag.setVCONVERT(0.0);
-  ag.setSCONVERT(0.0);
-  ag.setPROD10PAR(0.0);
-  ag.setPROD100PAR(0.0);
-  stormoccur = 1;
-  cwdloss = 0.0;
-//
-//  Values based on Gresham, 1991
-//  distmnthcnt = 1;
-  ag.setNATSEEDC (y[I_SEEDC] );
-  ag.setNATSEEDSTON (y[I_SEEDN] );
-
-      ag.standingdead( veg.cmnt,
-                       0.2*y[I_LEAFC]+0.11*(y[I_ROOTC]),
-                       0.2*y[I_LEAFN]+0.11*(y[I_ROOTN]),
-                       0.11*(y[I_SAPWOODC]+y[I_HEARTWOODC]+y[I_LABILEC]),
-                       0.11*(y[I_SAPWOODN]+y[I_HEARTWOODN]+y[I_LABILEN]),
-                       cwdloss );
-
-      prevy[I_LABILEC] = y[I_LABILEC] = (1. - 0.11)*y[I_LABILEC];   //destruction values from Batista & Platt
-      prevy[I_LABILEN] = y[I_LABILEN] = (1. - 0.11)*y[I_LABILEN];
-      prevy[I_LEAFC] = y[I_LEAFC] = (1. - 0.2)*y[I_LEAFC];
-      y[I_LAI] = y[I_LEAFC] * veg.getSLA(veg.cmnt);
-      prevy[I_LEAFN] = y[I_LEAFN] = (1. - 0.2)*y[I_LEAFN];
-      prevy[I_SAPWOODC] = y[I_SAPWOODC] = (1. - 0.11)*y[I_SAPWOODC];
-      prevy[I_SAPWOODN] = y[I_SAPWOODN] = (1. - 0.11)*y[I_SAPWOODN];
-      prevy[I_HEARTWOODC] = y[I_HEARTWOODC] = (1. - 0.11)*y[I_HEARTWOODC];
-      prevy[I_HEARTWOODN] = y[I_HEARTWOODN] = (1. - 0.11)*y[I_HEARTWOODN];
-      prevy[I_ROOTC] = y[I_ROOTC] = (1. - 0.11)*y[I_ROOTC];
-      prevy[I_ROOTN] = y[I_ROOTN] = (1. - 0.11)*y[I_ROOTN];
-   }  
-  }  
-#endif 
 
 
 
-#ifdef FIRE
-
-//  cout << "rco = " << pdyr << " " << pdm << " " << rco << " " << rcount << endl;
-//  if(initFlag == 1 && pdm == 7 && ag.state == 0 && pdyr > 1 && stormoccur == 0)
-//  vegmax = leafcb[veg.cmnt]+sapwoodcb[veg.cmnt]+heartwoodcb[veg.cmnt]+rootcb[veg.cmnt]+labilecb[veg.cmnt];
-//  replace = vegmax/(heartwoodcb[veg.cmnt]/veg.getTAUHEARTWOOD( veg.cmnt ));
-  replace = 3.0*veg.getTAUHEARTWOOD( veg.cmnt );
-  if(pdm == 7 && ag.state == 0 && pdyr > 1 && stormoccur == 0)
-  {
-//   if(ichrt == 0 || ((veg.cmnt == 8 || veg.cmnt == 6 || veg.cmnt == 14 || veg.cmnt == 27 || veg.cmnt == 31) && ichrt == 1))
-//   {
-      double dleaf=0,dwood=0;
-      int repi=0,mixi=0,lowi=0;
-
-//
-//   Based on Fire Regime Tables
-//
-      if(veg.cmnt == 2) // alpine tundra (PNW alpine/subalpine grassland and meadow) 
-      {
-        lowi = 0;
-        mixi = 750;
-        repi = 350;
-        vegmax = 450;
-      }
-
-      if(veg.cmnt == 4) // boreal forest (NE Spruce-Fir)
-      {
-        lowi = 0;
-        mixi = 0;
-        repi = 265;
-        vegmax = 9000;
-      }
-      if(veg.cmnt == 5) // temperate coniferous (PNW mixed CA-OR coastal)
-      {
-        lowi = 15;
-        mixi = 33;
-        repi = 150;
-        vegmax = 10800;
-      }
-      if(veg.cmnt == 6) // temperate deciduous (Southern Apps oak-hickory-pine)
-      {
-        lowi = 6;
-        mixi = 65;
-        repi = 180;
-        vegmax = 17400;
-      }
-      if(veg.cmnt == 9) // tall grassland (Great Plains Central tallgrass prairie)
-      {
-        lowi = 28;
-        mixi = 34;
-        repi = 5;
-        vegmax = 400;
-      }
-      if(veg.cmnt == 8) // short grassland (South Central U.S. southern shortgrass)
-      {
-        lowi = 0;
-        mixi = 0;
-        repi = 8;
-        vegmax = 300;
-      }
-      if(veg.cmnt == 11) // arid shrublands (Great Basin, Basin Big Sagebrush)
-      {
-        lowi = 0;
-        mixi = 200;
-        repi = 50;
-        vegmax = 540;
-      }
-      if(veg.cmnt == 13) // tropical evergreen 
-      {
-        lowi = 0;
-        mixi = 0;
-        repi = 0;
-        vegmax = 22000;
-      }
-
-      if(veg.cmnt == 12) // xeric forests (SW Woodland, Madrean oak-conifer woodland)
-      {
-        lowi = 14;
-        mixi = 140;
-        repi = 65;
-        vegmax = 4300;
-      }
-      if(veg.cmnt == 7) // temperate broadleaved evergreen (California mixed evergreen)
-      {
-        lowi = 45;
-        mixi = 25;
-        repi = 140;
-        vegmax = 15000;
-      }
-      if(veg.cmnt == 10) // Mediterranean shrublands (CA Chaparel or sage shrub)
-      {
-        lowi = 0;
-        mixi = 0;
-        repi = 50;
-        vegmax = 4300;
-      }
-//
-//   Set lowi and mixi = 0
-//   
-    lowi = 0;
-    mixi = 0;
-//    repi = 0;
-//   Fire Suppression
-//
-     if(pdyr >= 220 && initFlag == 1) { repi = repi * 2.0; }
-     //PCP code
-      rcount++;
-      mcount++;
-      lcount++;
-
-      repi = rco*repi/4 + repi;
-      mixi = mco*mixi/4 + mixi;
-      lowi = lco*lowi/4 + lowi;
-     //PCP code
-//      if(repi != 0 && ((int)rand() % (lowi -1))){
-//      cout << "diag = " << repi << " " << rcount << " " << rcount % repi << endl;
-//      if(repi != 0 && ((int)rand() % (repi o-1)) == 1) {
-//
-//    Intensity values from Fire Regime Table
-//
-//cout << "repi = " << repi << " " << rcount << " " << rco <<  endl;
-      if(repi != 0 && (rcount % repi) < 1){
-        firemag = 1-((vegmax - replace * repi)/veg.getVEGC());
-        if(firemag > 0.875) {firemag = 0.875;}
-//        if(firemag > 0.11) {firemag = 0.11;}
-        if(firemag < 0.0) {firemag = 0.0;}
-//        dleaf += 0.875;
-        dleaf += firemag;
-//        dwood += 0.875;
-        dwood += firemag;
-        rco = (rand()%2 == 1)?(double)(rand()%10+rand()%10+rand()%10)*-1/10:(double)(rand()%10+rand()%10+rand()%10)/10; //PCP code
-        rcount = 0; //PCP code
-        cwdloss = 0.29;
-//        sensitivity test
-//        cwdloss = 0.12;
-      }
-//     if(mixi != 0 && ((int)rand() % (lowi -1))){
-//      if(mixi != 0 && ((int)rand() % (mixi -1)) == 1) {
-      if(mixi != 0 && (mcount % mixi) < 1){
-        firemag = 1-((vegmax - replace * mixi)/veg.getVEGC());
-        if(firemag > 0.35) {firemag = 0.35;}
-        if(firemag < 0.0) {firemag = 0.0;}
-//        dleaf += 0.35;
-        dleaf += firemag;
-//        dwood += 0.35;
-        dwood += firemag;
-        mco = (rand()%2 == 1)?(double)(rand()%10+rand()%10+rand()%10)*-1/10:(double)(rand()%10+rand()%10+rand()%10)/10; //PCP code
-        mcount = 0; //PCP code
-        cwdloss = 0.24;
-      }
-//      if(lowi != 0 && ((int)rand() % (lowi -1))){
-//      if(lowi != 0 && ((int)rand() % (lowi -1)) == 1) {
-      if(lowi != 0 && (lcount % lowi) < 1){
-        dleaf += 0.25;
-        lco = (rand()%2 == 1)?(double)(rand()%10+rand()%10+rand()%10)*-1/10:(double)(rand()%10+rand()%10+rand()%10)/10; //PCP code
-        lcount = 0; //PCP code
-        cwdloss = 0.18;
-      }
-
-      if(dleaf > 1){dleaf = 1;}
-      if(dwood > 1){dwood = 1;}
-
-//     fireoccur = 0;
-
-      if( (dleaf != 0 || dwood != 0))
-     {
-
-      cout << "fire = " << pdyr << " " << veg.cmnt << " " << dwood << " " << dleaf << " " << lowi << " " << mixi << " " << repi << " " << firemag << " " << vegmax << " " << replace << " " << veg.getVEGC() << " " << rhmoist << " " << dq10 << endl;
-      rflog1 << "fire = " << pdyr << " " << veg.cmnt << " " << dwood << " " << dleaf << " " << lowi << " " << mixi << " " << repi << " " << firemag << " " << vegmax << " " << replace << " " << veg.getVEGC() << " " << rhmoist << " " << dq10 << endl;
-       fireoccur = 1;
-//       ag.setVCONVERT(1.0);
-//       Meigs et al. (2009)
-       ag.setVCONVERT(0.0124);
-//     sensitivity test - burn 20% of live
-//       ag.setVCONVERT(0.20);
-//       ag.setSCONVERT(0.025);
-       ag.setSCONVERT(0.0);
-       ag.setPROD10PAR(0.0);
-       ag.setPROD100PAR(0.0);
-
-  firemnthcnt = 1; //cwd
-//  distmnthcnt = 1;
-  ag.setNATSEEDC (y[I_SEEDC] );
-  ag.setNATSEEDSTON (y[I_SEEDN] );
-
-      ag.conversion( veg.cmnt,
-//                     dwood*y[I_ROOTC],
-                     0.0,
-//                     dwood*y[I_ROOTN],
-                     0.0,
-//                     dwood*(y[I_SAPWOODC]+y[I_HEARTWOODC]+y[I_LABILEC]) + dleaf*y[I_LEAFC],
-//                     dwood*(y[I_SAPWOODC]+y[I_HEARTWOODC]+y[I_LABILEC]) + y[I_LEAFC]*(dleaf/ag.getVCONVERT()),
-                     dwood*(y[I_SAPWOODC]+y[I_HEARTWOODC]) + y[I_LEAFC]*(dleaf/ag.getVCONVERT()),
-//                     dwood*(y[I_SAPWOODN]+y[I_HEARTWOODN]) + dleaf*y[I_LEAFN],
-                     dwood*(y[I_SAPWOODN]+y[I_HEARTWOODN]) + y[I_LEAFN]*(dleaf/ag.getVCONVERT()),
-//                     dwood*y[I_LABILEN],
-                     0.0,
-                     y[I_SOLC],
-                     y[I_SOLN],
-                     cwdloss,
-                     1 );
-//
-////  overwrite the slash with same as above but add to standing dead
-////
-      ag.standingdead( veg.cmnt,
-//                      dwood*y[I_ROOTC],
-                      0.0,
-//                      dwood*y[I_ROOTN],
-                      0.0,
-//                       (1.0-ag.getVCONVERT())*(dwood*(y[I_SAPWOODC]+y[I_HEARTWOODC]+y[I_LABILEC]) + dleaf*y[I_LEAFC]),
-//                       (1.0-ag.getVCONVERT())*(dwood*(y[I_SAPWOODC]+y[I_HEARTWOODC]+y[I_LABILEC]) ),
-                       (1.0-ag.getVCONVERT())*(dwood*(y[I_SAPWOODC]+y[I_HEARTWOODC]) ),
-//                       (1.0-ag.getVCONVERT())*(dwood*(y[I_SAPWOODN]+y[I_HEARTWOODN]+y[I_LABILEN]) ),
-                       (1.0-ag.getVCONVERT())*(dwood*(y[I_SAPWOODN]+y[I_HEARTWOODN]) ),
-                       cwdloss);
-
-
-//      prevy[I_LABILEC] = y[I_LABILEC] = (1. - dwood)*y[I_LABILEC];
-//      prevy[I_LABILEN] = y[I_LABILEN] = (1. - dwood) * y[I_LABILEN];
-      prevy[I_LEAFC] = y[I_LEAFC] = (1. - dleaf)*y[I_LEAFC];
-      y[I_LAI] = y[I_LEAFC] * veg.getSLA(veg.cmnt);
-      prevy[I_LEAFN] = y[I_LEAFN] =  (1. - dleaf)*y[I_LEAFN];
-      prevy[I_SAPWOODC] = y[I_SAPWOODC] = (1. - dwood)*y[I_SAPWOODC];
-      prevy[I_SAPWOODN] = y[I_SAPWOODN] = (1. - dwood)*y[I_SAPWOODN];
-      prevy[I_HEARTWOODC] = y[I_HEARTWOODC] = (1. - dwood)*y[I_HEARTWOODC];
-      prevy[I_HEARTWOODN] = y[I_HEARTWOODN] = (1. - dwood)*y[I_HEARTWOODN];
-//      prevy[I_ROOTC] = y[I_ROOTC] = (1. - dwood)*y[I_ROOTC];
-//      prevy[I_ROOTN] = y[I_ROOTN] = (1. - dwood)*y[I_ROOTN];
-
-   }
-//  }
-  }
-
+#if TEM_ENABLE_STORM
+  if( transient && getTimestep45().isMONTHSTART( pdm, 7 ) )
+    applyStormDisturbance( ichrt, rflog1 );
 #endif
+
 
 //cout << "diag = " << veg.getVEGC() << " " << y[I_SOLC] << " " << ag.getSLASHC() << " " << ag.getVOLAC() << " " << ag.getCONVRTFLXC() << " " << ag.getSTANDDEADC() << endl;
   dq10 = microbe.setDQ10LT( veg.cmnt,
@@ -5917,7 +5608,7 @@ cseed = 0.0;
 
   if ( blackhol != 0 )
   {
-    if( 0 == initFlag || pdyr < 0 || pdyr >= MAXRTIME ) { qualcon[0] = 10; }
+    if( 0 == initFlag || pdyr < 0 || pdyr >= NYEARS ) { qualcon[0] = 10; }
     else { qualcon[pdyr] += 10; }
   }
 
@@ -5929,6 +5620,7 @@ cseed = 0.0;
   #endif
   //massbal( y, prevy );
   massbal();  //BSF COMBO FIX
+
 //ag.setSLASHC(0.0);
 //ag.setSLASHN(0.0);
 //cout << "year, month = " << pdyr << " " << pdm << " " << ag.fert1950flag << endl;
@@ -5943,7 +5635,7 @@ cseed = 0.0;
 
 //cout << "diag = " << pdyr << " " << pdm << " " << soil.getAVLH2O() << " " <<  soil.getAWCAPMM() << " " << veg.getPESOILW() << " " <<  atms.getPREC() << endl;
 
-//   if(pdm == 11)
+//   if(getTimestep45().isYEAREND( pdm ))
 //   {
 
 //   vegceq[pdyr] = veg.getVEGC();
@@ -6053,13 +5745,13 @@ cseed = 0.0;
   // harvested this month
 //   cout << "harvest = " << ag.getGROWDD() << " " << ag.getGDDHARVST(ag.cmnt) << " " << y[I_NPP] << " " << y[I_SEEDC] << " " << y[I_ALLOCSEEDC] << " " << y[I_RMSEED] << " " << y[I_LTRSEEDC] << endl;
 //cout << "gdd " << ag.getGROWDD() << endl;
-  if(pdm == 0) {harcnt = 0;}
+  if(getTimestep45().isYEARSTART( pdm )) {harcnt = 0;}
   nprod = 0.0;
   nseed = 0.0;
 
 //if(ag.state == 1 && initFlag == 1) {
 //cout << "harvest = " << ag.state << " " << ag.getGROWDD() << " " << ag.getGDDHARVST(ag.cmnt) << " " << pdyr << " " << pdm << endl;}
-  if( (1 == ag.state || 2 == ag.state) && ((ag.getGROWDD() >= ag.getGDDHARVST(ag.cmnt)) || (harcnt == 0 && pdm == 9))    && (0 == ag.getFROSTFLAG() ) )
+  if( (1 == ag.state || 2 == ag.state) && ((ag.getGROWDD() >= ag.getGDDHARVST(ag.cmnt)) || (harcnt == 0 && getTimestep45().isMONTHSTART( pdm, 9 )))    && (0 == ag.getFROSTFLAG() ) )
 //  if( (1 == ag.state) && (ag.getGROWDD() >= ag.getGDDHARVST(ag.cmnt)) && (0 == ag.getFROSTFLAG() ) )
   {
 //    ag.harvest( pdm, y[I_SEEDC], y[I_SEEDN], veg.getVEGC() - ag.getCROPSEEDC( ag.cmnt ), veg.getVEGN() - ag.getCROPSEEDSTON( ag.cmnt ) );
@@ -6254,6 +5946,7 @@ cseed = 0.0;
   ag.setTOTEC( (veg.getVEGC()
              + y[I_SOLC]) );
 
+
 //  veg.setTOTC( veg.getVEGC() );
 
 
@@ -6318,7 +6011,7 @@ cseed = 0.0;
 /*  if( 0 == baseline )
     {
       sonp = soil.getSONINP()/soil.getNINPUT();
-      availnp = ((atms.getNDEP()/12000.0)+ag.fertn)/soil.getNINPUT();
+      availnp = ((atms.getNDEP()/(1000.0*CYCLE))+ag.fertn)/soil.getNINPUT();
       donpout = soil.getLCHDON()/(soil.getNLOST());
       dinpout = 1-donpout;
 
@@ -6344,9 +6037,9 @@ cseed = 0.0;
   updateYearSummary( pdm );
   if(mxeet < soil.getEET()) { mxeet = soil.getEET(); }
 
-  if(pdyr == (int)tauavg && pdm == CYCLE-1) { yearSummaryExtrapolate(); }
+  if(pdyr == (int)tauavg && ( getTimestep45().isYEAREND( pdm ) || isCutStep( pdm ) )) { yearSummaryExtrapolate(); }
 
-  if(pdm == CYCLE-1)
+  if( getTimestep45().isYEAREND( pdm ) || isCutStep( pdm ) )
   {
     if( (veg.yralloclc+veg.yrallocsc+veg.yrallocrc+veg.yrallocseedc
         -veg.yrrmleaf-veg.yrrmsapwood-veg.yrrmroot) != ZERO )
@@ -6397,7 +6090,7 @@ cseed = 0.0;
       veg.yrpseedi = ZERO;
     }
     
-    veg.setRPLEAF( veg.getRPLEAF()*pow(avgfac,12) + veg.yrpleafi*(1.0 - pow(avgfac,12)));
+    veg.setRPLEAF( veg.getRPLEAF()*pow(avgfac,CYCLE) + veg.yrpleafi*(1.0 - pow(avgfac,CYCLE)));
   }
 
 
@@ -6428,7 +6121,7 @@ cseed = 0.0;
 
   veg.setRPREC( veg.getRPREC()*avgfac+atms.getPREC()*(1.0-avgfac));
   veg.setRNPP( veg.getRNPP()*avgfac+veg.getNPP()*(1.0-avgfac));
-  if(pdm == CYCLE - 1)
+  if( getTimestep45().isYEAREND( pdm ) || isCutStep( pdm ) )
   {
 //  cout << "mxeet = " << mxeet << endl;
   soil.setREET( mxeet*avgfac+mxeet*(1.0-avgfac));
@@ -6530,8 +6223,9 @@ cseed = 0.0;
 
   if( (CYCLE-1) == pdm )
   {
-    veg.setTOPT( veg.getTOPT()*pow(avgfac,12)+veg.getNEWTOPT()*(1.0 - pow(avgfac,12)));
-    veg.setTOPTMIC( veg.getTOPTMIC()*pow(avgfac,12)+veg.getNEWTOPT()*(1.0 - pow(avgfac,12)));
+    veg.setTOPT( veg.getTOPT()*pow(avgfac,CYCLE)+veg.getNEWTOPT()*(1.0 - pow(avgfac,CYCLE)));
+    veg.setTOPTMIC( veg.getTOPTMIC()*pow(avgfac,CYCLE)+veg.getNEWTOPT()*(1.0 - pow(avgfac,CYCLE)));
+//    cout << "newTOPT = "  << veg.getTOPT() << " " << pow(avgfac,CYCLE) << " " << veg.getNEWTOPT() << endl;
     // annual number, so use avgfac^12 instead of just avgfac
 
     // Update optimum temperature parameters for GPP
@@ -6606,12 +6300,12 @@ cseed = 0.0;
 
 /*    if( 0 == baseline )
     {
-      ntot = soil.getSONINP()+veg.getVEGNINP()+atms.getNDEP()/12000.0+ag.fertn;
+      ntot = soil.getSONINP()+veg.getVEGNINP()+atms.getNDEP()/(1000.0*CYCLE)+ag.fertn;
       sonp = soil.getSONINP()/ntot;
-      availnp = (ag.fertn+atms.getNDEP()/12000.0)/ntot;
+      availnp = (ag.fertn+atms.getNDEP()/(1000.0*CYCLE))/ntot;
       donpout = soil.getLCHDON()/(soil.getLCHDON() + soil.getLCHDIN());
       dinpout = soil.getLCHDIN()/(soil.getLCHDON() + soil.getLCHDIN());
-//      availnp = (ag.fertn+veg.getVEGNINP()+atms.getNDEP()/12000.0)/ntot;
+//      availnp = (ag.fertn+veg.getVEGNINP()+atms.getNDEP()/(1000.0*CYCLE))/ntot;
       vegnp = veg.getVEGNINP()/ntot;
       if(soil.yrnin > soil.yrnlost)
       {
@@ -6636,9 +6330,9 @@ cseed = 0.0;
 
 /*    if( 0 == baseline )
     {
-      ntot = soil.getSONINP()+veg.getVEGNINP()+atms.getNDEP()/12000.0+ag.fertn;
+      ntot = soil.getSONINP()+veg.getVEGNINP()+atms.getNDEP()/(1000.0*CYCLE)+ag.fertn;
       sonp = soil.getSONINP()/ntot;
-      availnp = (ag.fertn+atms.getNDEP()/12000.0)/ntot;
+      availnp = (ag.fertn+atms.getNDEP()/(1000.0*CYCLE))/ntot;
       donpout = soil.getLCHDON()/(soil.getLCHDON() + soil.getLCHDIN());
       dinpout = soil.getLCHDIN()/(soil.getLCHDON() + soil.getLCHDIN());
       vegnp = veg.getVEGNINP()/ntot;
@@ -6904,11 +6598,11 @@ void Ttem45::updateVegBiomass( double pstate[] )
 void Ttem45::updateYearSummary( const int& pdm )
 {
 
-  double favg = 1.0 - exp(-1.0 / (12.0*tauavg));
+  double favg = 1.0 - exp(-1.0 / ((double)CYCLE*tauavg));
 
   // Update sum of annual carbon storage in ecosystems
  
-//  if(pdm == 0)
+//  if(getTimestep45().isYEARSTART( pdm ))
 //  {
 //    soil.yrnin = 0.0;
 //    soil.yrnlost = 0.0;
@@ -6948,143 +6642,143 @@ void Ttem45::updateYearSummary( const int& pdm )
 
   // Update sum of annual carbon fluxes in ecosystems
 
-  veg.yringpp = veg.yringpp*(1.0 - favg) + 12.0*y[I_INGPP]*favg;
-  veg.yrgpp   = veg.yrgpp*(1.0 - favg) + 12.0*y[I_GPP]*favg;
-  veg.yrinnpp = veg.yrinnpp*(1.0 - favg) + 12.0*veg.getINNPP()*favg;
-  veg.yrnpp   = veg.yrnpp*(1.0 - favg) + 12.0*veg.getNPP()*favg;
-  veg.yrgpr   = veg.yrgpr*(1.0 - favg) + 12.0*veg.getGPR()*favg;
-  veg.yrrmaint = veg.yrrmaint*(1.0 - favg) + 12.0*(y[I_RMLEAF] + y[I_RMSAPWOOD] + y[I_RMROOT] + y[I_RMSEED])*favg;
-  veg.yrrmleaf = veg.yrrmleaf*(1.0 - favg) + 12.0*y[I_RMLEAF]*favg;
-  veg.yrrmsapwood = veg.yrrmsapwood*(1.0 - favg) + 12.0*y[I_RMSAPWOOD]*favg;
-  veg.yrrmroot = veg.yrrmroot*(1.0 - favg) + 12.0*y[I_RMROOT]*favg;
-  veg.yrrgrowth = veg.yrrgrowth*(1.0 - favg) + 12.0*y[I_RVGRW]*favg;
+  veg.yringpp = veg.yringpp*(1.0 - favg) + (double)CYCLE*y[I_INGPP]*favg;
+  veg.yrgpp   = veg.yrgpp*(1.0 - favg) + (double)CYCLE*y[I_GPP]*favg;
+  veg.yrinnpp = veg.yrinnpp*(1.0 - favg) + (double)CYCLE*veg.getINNPP()*favg;
+  veg.yrnpp   = veg.yrnpp*(1.0 - favg) + (double)CYCLE*veg.getNPP()*favg;
+  veg.yrgpr   = veg.yrgpr*(1.0 - favg) + (double)CYCLE*veg.getGPR()*favg;
+  veg.yrrmaint = veg.yrrmaint*(1.0 - favg) + (double)CYCLE*(y[I_RMLEAF] + y[I_RMSAPWOOD] + y[I_RMROOT] + y[I_RMSEED])*favg;
+  veg.yrrmleaf = veg.yrrmleaf*(1.0 - favg) + (double)CYCLE*y[I_RMLEAF]*favg;
+  veg.yrrmsapwood = veg.yrrmsapwood*(1.0 - favg) + (double)CYCLE*y[I_RMSAPWOOD]*favg;
+  veg.yrrmroot = veg.yrrmroot*(1.0 - favg) + (double)CYCLE*y[I_RMROOT]*favg;
+  veg.yrrgrowth = veg.yrrgrowth*(1.0 - favg) + (double)CYCLE*y[I_RVGRW]*favg;
 
 
-  veg.yrltrc  = veg.yrltrc*(1.0 - favg) + 12.0*(y[I_LTRLC] + y[I_LTRSC] + y[I_LTRHC] + y[I_LTRRC] + y[I_LTRSEEDC])*favg;
-  microbe.yrrh = microbe.yrrh*(1.0 - favg) + 12.0*y[I_RH]*favg;
+  veg.yrltrc  = veg.yrltrc*(1.0 - favg) + (double)CYCLE*(y[I_LTRLC] + y[I_LTRSC] + y[I_LTRHC] + y[I_LTRRC] + y[I_LTRSEEDC])*favg;
+  microbe.yrrh = microbe.yrrh*(1.0 - favg) + (double)CYCLE*y[I_RH]*favg;
 
-  veg.yralloclc = veg.yralloclc*(1.0 - favg) + 12.0*y[I_ALLOCLC]*favg;
-  veg.yrallocsc = veg.yrallocsc*(1.0 - favg) + 12.0*y[I_ALLOCSC]*favg;
-  veg.yrallocrc = veg.yrallocrc*(1.0 - favg) + 12.0*y[I_ALLOCRC]*favg;
+  veg.yralloclc = veg.yralloclc*(1.0 - favg) + (double)CYCLE*y[I_ALLOCLC]*favg;
+  veg.yrallocsc = veg.yrallocsc*(1.0 - favg) + (double)CYCLE*y[I_ALLOCSC]*favg;
+  veg.yrallocrc = veg.yrallocrc*(1.0 - favg) + (double)CYCLE*y[I_ALLOCRC]*favg;
   
-  veg.yrallocilc = veg.yrallocilc*(1.0 - favg) + 12.0*y[I_ALLOCILC]*favg;
-  veg.yrallocisc = veg.yrallocisc*(1.0 - favg) + 12.0*y[I_ALLOCISC]*favg;
-  veg.yrallocirc = veg.yrallocirc*(1.0 - favg) + 12.0*y[I_ALLOCIRC]*favg;
-  veg.yrallociseedc = veg.yrallociseedc*(1.0 - favg) + 12.0*y[I_ALLOCISEEDC]*favg;
+  veg.yrallocilc = veg.yrallocilc*(1.0 - favg) + (double)CYCLE*y[I_ALLOCILC]*favg;
+  veg.yrallocisc = veg.yrallocisc*(1.0 - favg) + (double)CYCLE*y[I_ALLOCISC]*favg;
+  veg.yrallocirc = veg.yrallocirc*(1.0 - favg) + (double)CYCLE*y[I_ALLOCIRC]*favg;
+  veg.yrallociseedc = veg.yrallociseedc*(1.0 - favg) + (double)CYCLE*y[I_ALLOCISEEDC]*favg;
   
-  veg.yrallocseedc = veg.yrallocseedc*(1.0 - favg) + 12.0*y[I_ALLOCSEEDC]*favg;
-  veg.yrallocseedn = veg.yrallocseedn*(1.0 - favg) + 12.0*y[I_ALLOCSEEDN]*favg;
+  veg.yrallocseedc = veg.yrallocseedc*(1.0 - favg) + (double)CYCLE*y[I_ALLOCSEEDC]*favg;
+  veg.yrallocseedn = veg.yrallocseedn*(1.0 - favg) + (double)CYCLE*y[I_ALLOCSEEDN]*favg;
 
-  yrnep = yrnep*(1.0 - favg) + 12.0*nep*favg;
-  yrnce = yrnce*(1.0 - favg) + 12.0*nce*favg;
-  yrnbp = yrnbp*(1.0 - favg) + 12.0*nbp*favg;
+  yrnep = yrnep*(1.0 - favg) + (double)CYCLE*nep*favg;
+  yrnce = yrnce*(1.0 - favg) + (double)CYCLE*nce*favg;
+  yrnbp = yrnbp*(1.0 - favg) + (double)CYCLE*nbp*favg;
 
 
  // Update sum of annual nitrogen fluxes in ecosystems
 
-//  soil.yrnin = soil.yrnin*(1.0 - favg) + 12.0*(y[I_NINP] + y[I_NFIXN] + y[I_NFIXS])*favg;
-  soil.yrnin = soil.yrnin*(1.0 - favg) + 12.0*soil.getNINPUT()*favg;
+//  soil.yrnin = soil.yrnin*(1.0 - favg) + (double)CYCLE*(y[I_NINP] + y[I_NFIXN] + y[I_NFIXS])*favg;
+  soil.yrnin = soil.yrnin*(1.0 - favg) + (double)CYCLE*soil.getNINPUT()*favg;
 //  soil.yrnin = soil.yrnin + soil.getNINPUT();
 
-  ag.yrfertn = ag.yrfertn*(1.0 - favg) + 12.0*y[I_AGFRTN]*favg;
+  ag.yrfertn = ag.yrfertn*(1.0 - favg) + (double)CYCLE*y[I_AGFRTN]*favg;
 
-  veg.yrinnup = veg.yrinnup*(1.0 - favg) + 12.0*y[I_INNUP]*favg;
-  veg.yrnup   = veg.yrnup*(1.0 - favg) + 12.0*y[I_VNUP]*favg;
-  veg.yrnrsorb = veg.yrnrsorb*(1.0 - favg) + 12.0*(y[I_NRESORBL] + y[I_NRESORBS] + y[I_NRESORBR] + y[I_NRESORBSEED])*favg;
+  veg.yrinnup = veg.yrinnup*(1.0 - favg) + (double)CYCLE*y[I_INNUP]*favg;
+  veg.yrnup   = veg.yrnup*(1.0 - favg) + (double)CYCLE*y[I_VNUP]*favg;
+  veg.yrnrsorb = veg.yrnrsorb*(1.0 - favg) + (double)CYCLE*(y[I_NRESORBL] + y[I_NRESORBS] + y[I_NRESORBR] + y[I_NRESORBSEED])*favg;
 
-  veg.yrltrn = veg.yrltrn*(1.0 - favg) + 12.0*(y[I_LTRLN] + y[I_LTRSN] + y[I_LTRHN] + y[I_LTRRN] + y[I_LTRSEEDN])*favg;
+  veg.yrltrn = veg.yrltrn*(1.0 - favg) + (double)CYCLE*(y[I_LTRLN] + y[I_LTRSN] + y[I_LTRHN] + y[I_LTRRN] + y[I_LTRSEEDN])*favg;
 
-  microbe.yrnuptake = microbe.yrnuptake*(1.0 - favg) + 12.0*y[I_MNUP]*favg;
-  microbe.yrnmin = microbe.yrnmin*(1.0 - favg)  + 12.0*y[I_NMIN]*favg;
+  microbe.yrnuptake = microbe.yrnuptake*(1.0 - favg) + (double)CYCLE*y[I_MNUP]*favg;
+  microbe.yrnmin = microbe.yrnmin*(1.0 - favg)  + (double)CYCLE*y[I_NMIN]*favg;
 
-//  soil.yrnlost = soil.yrnlost*(1.0 - favg) + 12.0*(y[I_NLST])*favg;
-  soil.yrnlost = soil.yrnlost*(1.0 - favg) + 12.0*(soil.getNLOST())*favg;
+//  soil.yrnlost = soil.yrnlost*(1.0 - favg) + (double)CYCLE*(y[I_NLST])*favg;
+  soil.yrnlost = soil.yrnlost*(1.0 - favg) + (double)CYCLE*(soil.getNLOST())*favg;
 //  soil.yrnlost = soil.yrnlost + soil.getNLOST();
-  soil.yrlchdin = soil.yrlchdin*(1.0 - favg) + 12.0*(soil.getLCHDIN())*favg;
+  soil.yrlchdin = soil.yrlchdin*(1.0 - favg) + (double)CYCLE*(soil.getLCHDIN())*favg;
 
 //cout << "nvals = " << soil.yrnin << " " << soil.yrnlost << " " << soil.getNINPUT() << " " << soil.getNLOST() << endl;
 
    // Update sum of annual water fluxes in ecosystems
 
-  ag.yrirrig = ag.yrirrig*(1.0 - favg) + 12.0*y[I_AGIRRIG]*favg;
-  soil.yrineet = soil.yrineet*(1.0 - favg) + 12.0*y[I_INEET]*favg;
-  soil.yreet = soil.yreet*(1.0 - favg) + 12.0*y[I_EET]*favg;
-  soil.yrrperc = soil.yrrperc*(1.0 - favg) + 12.0*y[I_RPERC]*favg;
-  soil.yrsperc = soil.yrsperc*(1.0 - favg) + 12.0*y[I_SPERC]*favg;
-  soil.yrrrun = soil.yrrrun*(1.0 - favg) + 12.0*y[I_RRUN]*favg;
-  soil.yrsrun = soil.yrsrun*(1.0 - favg) + 12.0*y[I_SRUN]*favg;
+  ag.yrirrig = ag.yrirrig*(1.0 - favg) + (double)CYCLE*y[I_AGIRRIG]*favg;
+  soil.yrineet = soil.yrineet*(1.0 - favg) + (double)CYCLE*y[I_INEET]*favg;
+  soil.yreet = soil.yreet*(1.0 - favg) + (double)CYCLE*y[I_EET]*favg;
+  soil.yrrperc = soil.yrrperc*(1.0 - favg) + (double)CYCLE*y[I_RPERC]*favg;
+  soil.yrsperc = soil.yrsperc*(1.0 - favg) + (double)CYCLE*y[I_SPERC]*favg;
+  soil.yrrrun = soil.yrrrun*(1.0 - favg) + (double)CYCLE*y[I_RRUN]*favg;
+  soil.yrsrun = soil.yrsrun*(1.0 - favg) + (double)CYCLE*y[I_SRUN]*favg;
 
-  atms.yrrain = atms.yrrain*(1.0 - favg) + 12.0*atms.getRAIN()*favg;
-  atms.yrsnowfall = atms.yrsnowfall*(1.0 - favg) + 12.0*atms.getSNOWFALL()*favg;
+  atms.yrrain = atms.yrrain*(1.0 - favg) + (double)CYCLE*atms.getRAIN()*favg;
+  atms.yrsnowfall = atms.yrsnowfall*(1.0 - favg) + (double)CYCLE*atms.getSNOWFALL()*favg;
 //  atms.yrpet += atms.getPET();
-  atms.yrpet = atms.yrpet*(1.0 - favg) + 12.0*veg.getPET()*favg;
-  soil.yrsnowinf = soil.yrsnowinf*(1.0 - favg) + 12.0*soil.getSNOWINF()*favg;
-  soil.yrh2oyld = soil.yrh2oyld*(1.0 - favg) + 12.0*soil.getH2OYLD()*favg;
+  atms.yrpet = atms.yrpet*(1.0 - favg) + (double)CYCLE*veg.getPET()*favg;
+  soil.yrsnowinf = soil.yrsnowinf*(1.0 - favg) + (double)CYCLE*soil.getSNOWINF()*favg;
+  soil.yrh2oyld = soil.yrh2oyld*(1.0 - favg) + (double)CYCLE*soil.getH2OYLD()*favg;
 
   if( (atms.getTAIR() >= ag.getGDDMIN(ag.cmnt))&&(atms.getTAIRN() > ag.getTKILL(ag.cmnt)) )
   {
-    ag.yrgrowdd = ag.yrgrowdd*(1.0 - favg) + 12.0*(atms.getTAIR() - ag.getGDDMIN(ag.cmnt))*atms.getNDAYS( pdm )*favg;
+    ag.yrgrowdd = ag.yrgrowdd*(1.0 - favg) + (double)CYCLE*(atms.getTAIR() - ag.getGDDMIN(ag.cmnt))*atms.getNDAYS( pdm )*favg;
   }
   else
   {
     ag.yrgrowdd = ag.yrgrowdd*(1.0 - favg);
   }
-  ag.yrfrost = ag.yrfrost*(1.0 - favg) + 12.0*ag.getFROSTFLAG()*favg;
+  ag.yrfrost = ag.yrfrost*(1.0 - favg) + (double)CYCLE*ag.getFROSTFLAG()*favg;
 
-  ag.yrstubC = ag.yrstubC*(1.0 - favg) + 12.0*ag.getSTUBBLEC()*favg;
-  ag.yrstubN = ag.yrstubN*(1.0 - favg) + 12.0*ag.getSTUBBLEN()*favg;
+  ag.yrstubC = ag.yrstubC*(1.0 - favg) + (double)CYCLE*ag.getSTUBBLEC()*favg;
+  ag.yrstubN = ag.yrstubN*(1.0 - favg) + (double)CYCLE*ag.getSTUBBLEN()*favg;
 
  // Update sum of annual carbon and nitrogen fluxes from
  //   agricultural conversion
 
-  ag.yrconvrtC = ag.yrconvrtC*(1.0 - favg) + 12.0*ag.getCONVRTFLXC()*favg;
-  ag.yrvconvrtC = ag.yrvconvrtC*(1.0 - favg) + 12.0*ag.getVCONVRTFLXC()*favg;
-  ag.yrsconvrtC = ag.yrsconvrtC*(1.0 - favg) + 12.0*ag.getSCONVRTFLXC()*favg;
-  ag.yrslashC = ag.yrslashC*(1.0 - favg) + 12.0*ag.getSLASHC()*favg;
-  ag.yrcflux = ag.yrcflux*(1.0 - favg) + 12.0*ag.getCFLUX()*favg;
+  ag.yrconvrtC = ag.yrconvrtC*(1.0 - favg) + (double)CYCLE*ag.getCONVRTFLXC()*favg;
+  ag.yrvconvrtC = ag.yrvconvrtC*(1.0 - favg) + (double)CYCLE*ag.getVCONVRTFLXC()*favg;
+  ag.yrsconvrtC = ag.yrsconvrtC*(1.0 - favg) + (double)CYCLE*ag.getSCONVRTFLXC()*favg;
+  ag.yrslashC = ag.yrslashC*(1.0 - favg) + (double)CYCLE*ag.getSLASHC()*favg;
+  ag.yrcflux = ag.yrcflux*(1.0 - favg) + (double)CYCLE*ag.getCFLUX()*favg;
 
-  ag.yrconvrtN = ag.yrconvrtN*(1.0 - favg) + 12.0*ag.getCONVRTFLXN()*favg;
-  ag.yrvconvrtN = ag.yrvconvrtN*(1.0 - favg) + 12.0*ag.getVCONVRTFLXN()*favg;
-  ag.yrsconvrtN = ag.yrsconvrtN*(1.0 - favg) + 12.0*ag.getSCONVRTFLXN()*favg;
-  ag.yrslashN = ag.yrslashN*(1.0 - favg) + 12.0*ag.getSLASHN()*favg;
+  ag.yrconvrtN = ag.yrconvrtN*(1.0 - favg) + (double)CYCLE*ag.getCONVRTFLXN()*favg;
+  ag.yrvconvrtN = ag.yrvconvrtN*(1.0 - favg) + (double)CYCLE*ag.getVCONVRTFLXN()*favg;
+  ag.yrsconvrtN = ag.yrsconvrtN*(1.0 - favg) + (double)CYCLE*ag.getSCONVRTFLXN()*favg;
+  ag.yrslashN = ag.yrslashN*(1.0 - favg) + (double)CYCLE*ag.getSLASHN()*favg;
 
-  ag.yrnrent = ag.yrnrent*(1.0 - favg) + 12.0*ag.getNRETENT()*favg;
-  ag.yrnvrent = ag.yrnvrent*(1.0 - favg) + 12.0*ag.getNVRETENT()*favg;
-  ag.yrnsrent = ag.yrnsrent*(1.0 - favg) + 12.0*ag.getNSRETENT()*favg;
+  ag.yrnrent = ag.yrnrent*(1.0 - favg) + (double)CYCLE*ag.getNRETENT()*favg;
+  ag.yrnvrent = ag.yrnvrent*(1.0 - favg) + (double)CYCLE*ag.getNVRETENT()*favg;
+  ag.yrnsrent = ag.yrnsrent*(1.0 - favg) + (double)CYCLE*ag.getNSRETENT()*favg;
 
-  ag.yrformResidueC = ag.yrformResidueC*(1.0 - favg) + 12.0*ag.getFORMCROPRESIDUEC()*favg;
-  ag.yrformResidueN = ag.yrformResidueN*(1.0 - favg) + 12.0*ag.getFORMCROPRESIDUEN()*favg;
+  ag.yrformResidueC = ag.yrformResidueC*(1.0 - favg) + (double)CYCLE*ag.getFORMCROPRESIDUEC()*favg;
+  ag.yrformResidueN = ag.yrformResidueN*(1.0 - favg) + (double)CYCLE*ag.getFORMCROPRESIDUEN()*favg;
 
-  ag.yrfluxResidueC = ag.yrfluxResidueC*(1.0 - favg) + 12.0*ag.getCROPRESIDUEFLXC()*favg;
-  ag.yrfluxResidueN = ag.yrfluxResidueN*(1.0 - favg) + 12.0*ag.getCROPRESIDUEFLXN()*favg;
+  ag.yrfluxResidueC = ag.yrfluxResidueC*(1.0 - favg) + (double)CYCLE*ag.getCROPRESIDUEFLXC()*favg;
+  ag.yrfluxResidueN = ag.yrfluxResidueN*(1.0 - favg) + (double)CYCLE*ag.getCROPRESIDUEFLXN()*favg;
 
 
  // Update sum of annual carbon and nitrogen fluxes from
  //   products
 
-  ag.yrformPROD1C = ag.yrformPROD1C*(1.0 - favg) + 12.0*ag.getCROPPRODC()*favg;
-  ag.yrformPROD1N = ag.yrformPROD1N*(1.0 - favg) + 12.0*ag.getCROPPRODN()*favg;
+  ag.yrformPROD1C = ag.yrformPROD1C*(1.0 - favg) + (double)CYCLE*ag.getCROPPRODC()*favg;
+  ag.yrformPROD1N = ag.yrformPROD1N*(1.0 - favg) + (double)CYCLE*ag.getCROPPRODN()*favg;
 
-  ag.yrdecayPROD1C = ag.yrdecayPROD1C*(1.0 - favg) + 12.0*ag.getPROD1DECAYC()*favg;
-  ag.yrdecayPROD1N = ag.yrdecayPROD1N*(1.0 - favg) + 12.0*ag.getPROD1DECAYN()*favg;
+  ag.yrdecayPROD1C = ag.yrdecayPROD1C*(1.0 - favg) + (double)CYCLE*ag.getPROD1DECAYC()*favg;
+  ag.yrdecayPROD1N = ag.yrdecayPROD1N*(1.0 - favg) + (double)CYCLE*ag.getPROD1DECAYN()*favg;
 
-  ag.yrformPROD10C = ag.yrformPROD10C*(1.0 - favg) + 12.0*ag.getFORMPROD10C()*favg;
-  ag.yrformPROD10N = ag.yrformPROD10N*(1.0 - favg) + 12.0*ag.getFORMPROD10N()*favg;
+  ag.yrformPROD10C = ag.yrformPROD10C*(1.0 - favg) + (double)CYCLE*ag.getFORMPROD10C()*favg;
+  ag.yrformPROD10N = ag.yrformPROD10N*(1.0 - favg) + (double)CYCLE*ag.getFORMPROD10N()*favg;
 
-  ag.yrdecayPROD10C = ag.yrdecayPROD10C*(1.0 - favg) + 12.0*ag.getPROD10DECAYC()*favg;
-  ag.yrdecayPROD10N = ag.yrdecayPROD10N*(1.0 - favg) + 12.0*ag.getPROD10DECAYN()*favg;
+  ag.yrdecayPROD10C = ag.yrdecayPROD10C*(1.0 - favg) + (double)CYCLE*ag.getPROD10DECAYC()*favg;
+  ag.yrdecayPROD10N = ag.yrdecayPROD10N*(1.0 - favg) + (double)CYCLE*ag.getPROD10DECAYN()*favg;
 
-  ag.yrformPROD100C = ag.yrformPROD100C*(1.0 - favg) + 12.0*ag.getFORMPROD100C()*favg;
-  ag.yrformPROD100N = ag.yrformPROD100N*(1.0 - favg) + 12.0*ag.getFORMPROD100N()*favg;
+  ag.yrformPROD100C = ag.yrformPROD100C*(1.0 - favg) + (double)CYCLE*ag.getFORMPROD100C()*favg;
+  ag.yrformPROD100N = ag.yrformPROD100N*(1.0 - favg) + (double)CYCLE*ag.getFORMPROD100N()*favg;
 
-  ag.yrdecayPROD100C = ag.yrdecayPROD100C*(1.0 - favg) + 12.0*ag.getPROD100DECAYC()*favg;
-  ag.yrdecayPROD100N = ag.yrdecayPROD100N*(1.0 - favg) + 12.0*ag.getPROD100DECAYN()*favg;
+  ag.yrdecayPROD100C = ag.yrdecayPROD100C*(1.0 - favg) + (double)CYCLE*ag.getPROD100DECAYC()*favg;
+  ag.yrdecayPROD100N = ag.yrdecayPROD100N*(1.0 - favg) + (double)CYCLE*ag.getPROD100DECAYN()*favg;
 
-  ag.yrformTOTPRODC = ag.yrformTOTPRODC*(1.0 - favg) + 12.0*ag.getFORMTOTPRODC()*favg;
-  ag.yrformTOTPRODN = ag.yrformTOTPRODN*(1.0 - favg) + 12.0*ag.getFORMTOTPRODN()*favg;
+  ag.yrformTOTPRODC = ag.yrformTOTPRODC*(1.0 - favg) + (double)CYCLE*ag.getFORMTOTPRODC()*favg;
+  ag.yrformTOTPRODN = ag.yrformTOTPRODN*(1.0 - favg) + (double)CYCLE*ag.getFORMTOTPRODN()*favg;
 
-  ag.yrdecayTOTPRODC = ag.yrdecayTOTPRODC*(1.0 - favg) + 12.0*ag.getTOTPRODDECAYC()*favg;
-  ag.yrdecayTOTPRODN = ag.yrdecayTOTPRODN*(1.0 - favg) + 12.0*ag.getTOTPRODDECAYN()*favg;
+  ag.yrdecayTOTPRODC = ag.yrdecayTOTPRODC*(1.0 - favg) + (double)CYCLE*ag.getTOTPRODDECAYC()*favg;
+  ag.yrdecayTOTPRODN = ag.yrdecayTOTPRODN*(1.0 - favg) + (double)CYCLE*ag.getTOTPRODDECAYN()*favg;
 
 };
 

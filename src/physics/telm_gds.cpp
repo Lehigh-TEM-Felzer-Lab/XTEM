@@ -2,35 +2,28 @@
 *****************************************************************
 TELM_GDS.CPP - Runs TEM for a single grid cell
 
-Modifications:
-
-20060127 - DWK created by modifying telm50b5.cpp
-20060127 - DWK changed include from telm50b5.h to tel,437.h
-20060127 - DWK changed TEMelmnt50:: to TEMelmntflux::
-20060127 - DWK added double aot40 to atmswritepred()
-20060127 - DWK deleted tem.soil.stm.updateyrCDM(),
-           tem.soil.setPREVDST10(), tem.soil.stm.setNEXTTAIR(),
-           tem.soil.stm.setNEXTSNOWFALL(),
-           tem.soil.setNEXTDST10() and tem.soil.getDST10()
-           from equilibrateTEM() and updateTEMmonth()
-20060127 - DWK added tem.atms.setAOT40() to equilibrateTEM(),
-           setTEMequilState() and updateTEMmonth()
-20060127 - DWK deleted double dst10[CYCLE], double prevdst10,
-           double STMdx9[MAXNODES], int STMis9, int STMsmass9,
-           double STMt9[MAXNODES], double STMwater9[MAXNODES],
-           double STMweight9[MAXSNODES], double STMx9[MAXNODES],
-           double STMxfa9[MAXNODES], double STMxfb9[MAXNODES]
-           to getTEMCohortState(), initializeCohortTEMState(),
-           readCohortState(), saveTEMCohortState(),
-           setCohortTEMState() and writeCohortState()
-20060127 - DWK added I_FOZONE and I_FINDOZONE to
-           outputTEMmonth() and temwritepred()
-20060127 - DWK deleted Soil thermal model variables from
-           outputTEMmonth() and temwritepred()
-20070105 - TWC changed name to telm45, versions _allfert,
-           _nofert, and _fert provide different fertilization
-           scenarios for agriculture
-
+Version: XTEM version 4.5
+20241110 Changed: version number 4.5 (only the input and output, configuration and time handling changed).
+20241110 Changed: col and row renamed lon and lat.
+20241109 Changed: Output goes to the NetCDF writer (tem::nc::outputPut) instead of one text file per variable,
+         so one file holds all variables.
+20241109 Changed: The cohort state is read and written through tem_state_io.h, one NetCDF state file for all
+         cells.
+20241109 Updated: Nitrogen fertilizer of cropland and pasture (xnfertflag) is passed to the soil nitrogen
+         budget.
+20241109 Updated: Fire burned area, potential and actual evapotranspiration are returned as
+         output variables.
+20241109 Changed: Arrays are sized MAXCYCLE for the run step.
+20241109 Updated: The cohort metadata of each year (standage, subtype, cmnt, carea, subarea) is written to the
+         output.
+20241109 Changed: The texture and elevation inputs are iftexture and ifelev (were fstxt and felev).
+20241109 Fixed: A rejected cohort gets its missing values also when the run ends inside a year
+         (Ttem45::isCutStep).
+20241109 Changed: Annual averages use CYCLE and not 12.
+20241110 Changed: Yearly and per-step arrays are std::vector sized at run time (CYCLE, NYEARS, NCOHORTS);
+         MAXCYCLE, MAXRTIME and MAXCHRTS removed.
+20241110 Changed: Absorbs telm45_competition: the competition key orders the cohort and step loops; output is
+         [cohort][var][step] in both orders.
 
 ****************************************************************
 ************************************************************* */
@@ -40,8 +33,6 @@ Modifications:
 
 #include<cstdio>
 
-  using std::fscanf;
-  using std::FILE;
   using std::printf;
 
 #include<iostream>
@@ -83,6 +74,9 @@ Modifications:
 
 
 #include "telm_gds.h"
+#include "tem_log.h"
+
+  #include "tem_netcdf_io.h"
 
 /* *************************************************************
 ************************************************************* */
@@ -90,8 +84,8 @@ Modifications:
 Telm45::Telm45()
 {
 
-  col = MISSING;
-  row = MISSING;
+  lon = MISSING;
+  lat = MISSING;
   carea = -999;
   subarea = -999;
   fatalerr = 0;
@@ -105,52 +99,17 @@ Telm45::Telm45()
 /* *************************************************************
 ************************************************************** */
 
-void Telm45::atmswritemiss( ofstream fout[NUMATMS],
-                                const vector<string>& predname,
-                                const int& pdyr,
-                                const int& natmspred,
-                                const double value )
-{
-
-  int i;
-  int dm;
-  Clmdat45 atmspred;
-
-  for( i = 0; i < natmspred; ++i )
-  {
-    for( dm = 0; dm < CYCLE; ++dm )
-    {
-      atmspred.mon[dm] = value;
-    }
-
-	 atmspred.outdel( fout[i],
-                          col,
-                          row,
-                          predname[i],
-                          carea,
-	                  atmstotyr[pdyr],
-                          atmspred.mon,
-                          contnent );
-  }
-
-};
-
-/* *************************************************************
-************************************************************* */
-
-
 /* *************************************************************
 ************************************************************** */
 
-void Telm45::atmswritepred( ofstream fout[NUMATMS],
-                            const int& pdyr,
+void Telm45::atmswritepred( const int& pdyr,
                                 const vector<string>& predname,
                                 const int& natmspred )
 {
 
   int i;
   int dm;
-  Clmdat45 atmspred;
+  std::vector<double> predicted( CYCLE, 0.0 );
 
   // Covert cal/cm2/day to W/m2 (4.186 Joules / calorie)
 
@@ -163,7 +122,7 @@ void Telm45::atmswritepred( ofstream fout[NUMATMS],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        atmspred.mon[dm] = climate[clm.I_GIRR][dm][pdyr] * cal2Watts;
+        predicted[dm] = climate[clm.I_GIRR][dm][pdyr] * cal2Watts;
       }
     }
 
@@ -171,7 +130,7 @@ void Telm45::atmswritepred( ofstream fout[NUMATMS],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        atmspred.mon[dm] = climate[clm.I_NIRR][dm][pdyr] * cal2Watts;
+        predicted[dm] = climate[clm.I_NIRR][dm][pdyr] * cal2Watts;
       }
     }
 
@@ -179,7 +138,7 @@ void Telm45::atmswritepred( ofstream fout[NUMATMS],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        atmspred.mon[dm] = climate[clm.I_PAR][dm][pdyr] * cal2Watts;
+        predicted[dm] = climate[clm.I_PAR][dm][pdyr] * cal2Watts;
       }
     }
 
@@ -187,7 +146,7 @@ void Telm45::atmswritepred( ofstream fout[NUMATMS],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        atmspred.mon[dm] = climate[clm.I_CLDS][dm][pdyr];
+        predicted[dm] = climate[clm.I_CLDS][dm][pdyr];
       }
     }
 
@@ -195,7 +154,7 @@ void Telm45::atmswritepred( ofstream fout[NUMATMS],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-      	atmspred.mon[dm] = climate[clm.I_TAIR][dm][pdyr];
+        predicted[dm] = climate[clm.I_TAIR][dm][pdyr];
       }
     }
 
@@ -203,7 +162,7 @@ void Telm45::atmswritepred( ofstream fout[NUMATMS],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-      	atmspred.mon[dm] = climate[clm.I_TAIRD][dm][pdyr];
+        predicted[dm] = climate[clm.I_TAIRD][dm][pdyr];
       }
     }
     
@@ -211,7 +170,7 @@ void Telm45::atmswritepred( ofstream fout[NUMATMS],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-      	atmspred.mon[dm] = climate[clm.I_TAIRN][dm][pdyr];
+        predicted[dm] = climate[clm.I_TAIRN][dm][pdyr];
       }
     }
 
@@ -219,7 +178,7 @@ void Telm45::atmswritepred( ofstream fout[NUMATMS],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-      	atmspred.mon[dm] = climate[clm.I_PREC][dm][pdyr];
+        predicted[dm] = climate[clm.I_PREC][dm][pdyr];
       }
     }
 
@@ -227,7 +186,7 @@ void Telm45::atmswritepred( ofstream fout[NUMATMS],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-      	atmspred.mon[dm] = climate[clm.I_RAIN][dm][pdyr];
+        predicted[dm] = climate[clm.I_RAIN][dm][pdyr];
       }
     }
 
@@ -235,7 +194,7 @@ void Telm45::atmswritepred( ofstream fout[NUMATMS],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-      	atmspred.mon[dm] = climate[clm.I_SNWFAL][dm][pdyr];
+        predicted[dm] = climate[clm.I_SNWFAL][dm][pdyr];
       }
     }
 
@@ -243,7 +202,7 @@ void Telm45::atmswritepred( ofstream fout[NUMATMS],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-      	atmspred.mon[dm] = climate[clm.I_AOT40][dm][pdyr];
+        predicted[dm] = climate[clm.I_AOT40][dm][pdyr];
       }
     }
 
@@ -251,7 +210,7 @@ void Telm45::atmswritepred( ofstream fout[NUMATMS],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-      	atmspred.mon[dm] = climate[clm.I_TRANGE][dm][pdyr];
+        predicted[dm] = climate[clm.I_TRANGE][dm][pdyr];
       }
     }
 
@@ -259,7 +218,7 @@ void Telm45::atmswritepred( ofstream fout[NUMATMS],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-      	atmspred.mon[dm] = climate[clm.I_VPR][dm][pdyr];
+        predicted[dm] = climate[clm.I_VPR][dm][pdyr];
       }
     }
 
@@ -267,7 +226,7 @@ void Telm45::atmswritepred( ofstream fout[NUMATMS],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-      	atmspred.mon[dm] = climate[clm.I_VPDD][dm][pdyr];
+        predicted[dm] = climate[clm.I_VPDD][dm][pdyr];
       }
     }
     
@@ -275,7 +234,7 @@ void Telm45::atmswritepred( ofstream fout[NUMATMS],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-      	atmspred.mon[dm] = climate[clm.I_VPDN][dm][pdyr];
+        predicted[dm] = climate[clm.I_VPDN][dm][pdyr];
       }
     }
 
@@ -283,7 +242,7 @@ void Telm45::atmswritepred( ofstream fout[NUMATMS],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        atmspred.mon[dm] = climate[clm.I_DAYL][dm][pdyr];
+        predicted[dm] = climate[clm.I_DAYL][dm][pdyr];
       }
     }
 
@@ -291,7 +250,7 @@ void Telm45::atmswritepred( ofstream fout[NUMATMS],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        atmspred.mon[dm] = climate[clm.I_WS10][dm][pdyr];
+        predicted[dm] = climate[clm.I_WS10][dm][pdyr];
       }
     }
     
@@ -299,19 +258,17 @@ void Telm45::atmswritepred( ofstream fout[NUMATMS],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        atmspred.mon[dm] = MISSING;
+        predicted[dm] = MISSING;
       }
     }
 
+    if( tem::nc::outputEnabled() )
+    {
+      tem::nc::outputPut( predname[i], lon, lat, 0, year, &predicted[0] );
+    }
+
 //    cout << "year ins atmspred = " << year << endl;
-    atmspred.outdel( fout[i],
-                     col,
-                     row,
-                     predname[i],
-                     carea,
-                     year,
-                     atmspred.mon,
-                     contnent );
+
   }
 
 };
@@ -323,33 +280,33 @@ void Telm45::atmswritepred( ofstream fout[NUMATMS],
 /* *************************************************************
 ************************************************************* */
 
-int Telm45::coregerr( ofstream& rflog1,
+int Telm45::coregerr( std::ostream& rflog1,
                           const string& varname1,
-                          const float& col1,
-                          const float& row1,
+                          const float& lon1,
+                          const float& lat1,
                           const string& varname2,
-                          const float& col2,
-                          const float& row2 )
+                          const float& lon2,
+                          const float& lat2 )
 {
 
   int fatalerr = 0;
 
-  if( col1 != col2 || row1 != row2 )
+  if( lon1 != lon2 || lat1 != lat2 )
   {
     fatalerr = 1;
 
     cout << "ERROR:  " << varname1 << " data and ";
     cout << varname2 << "data are not coregistered." << endl;
-    cout << "COL = " << col1 << " and ROW = " << row1;
+    cout << "lon = " << lon1 << " and lat = " << lat1;
     cout << " in " << varname1 << " data" << endl;
-    cout << "COL = " << col2 << " and ROW = " << row2;
+    cout << "lon = " << lon2 << " and lat = " << lat2;
     cout << " in " << varname2 << " data" << endl;
 
     rflog1 << "ERROR:  " << varname1 << " data and ";
     rflog1 << varname2 << "data are not coregistered." << endl;
-    rflog1 << "COL = " << col1 << " and ROW = " << row1;
+    rflog1 << "lon = " << lon1 << " and lat = " << lat1;
     rflog1 << " in " << varname1 << " data" << endl;
-    rflog1 << "COL = " << col2 << " and ROW = " << row2;
+    rflog1 << "lon = " << lon2 << " and lat = " << lat2;
     rflog1 << " in " << varname2 << " data" << endl;
   }
 
@@ -366,11 +323,10 @@ int Telm45::coregerr( ofstream& rflog1,
 
 int Telm45::equilibrateTEM( const double& ptol,
                             const int& pichrt,
-                            ofstream ftempred[NUMTEM],
                             const vector<string>& tempredmap,
                             const int& spinoutfg,
                             int& year,
-                            ofstream& rflog1 
+                            std::ostream& rflog1 
  )
 {
   // Run TEM until steady state conditions occur (equilibrium)
@@ -397,12 +353,11 @@ int Telm45::equilibrateTEM( const double& ptol,
     tem.ag.setFERTNCROP( nfertcrop[0][cdyear] );
     tem.ag.setFERTNPASTURE( nfertpasture[0][cdyear] );
 
-//    
+//
 //  BSF initialize variable for first planting month
 //
-   
     tem.setGDDINIT(0);
-    tem.setIDUM(12);
+    tem.setIDUM( CYCLE );
 
     for( dm = 0; dm < CYCLE; ++dm )
     {
@@ -459,12 +414,11 @@ int Telm45::equilibrateTEM( const double& ptol,
 
       // Save TEM output to telmnt[0].output
 
-      outputTEMmonth( dm );
+      outputTEMmonth( dm, pichrt );
     } // end monthly for loop
 
              if(spinoutfg == 1) {
-                    temwritepred( ftempred,
-                                tempredmap,
+                    temwritepred( tempredmap,
                                 dyr,
                                 pichrt,
                                 ntempred,
@@ -741,6 +695,7 @@ void Telm45::getTEMCohortState( const int& pichrt )
   tem.veg.yrproot = cohort[pichrt].yrproot;
  //  BSF added yrseed
   tem.veg.yrpseed = cohort[pichrt].yrpseed;
+
   
   tem.veg.yralloclc = cohort[pichrt].yralloclc;
   tem.veg.yrallocsc = cohort[pichrt].yrallocsc;
@@ -770,6 +725,10 @@ void Telm45::initializeCohortTEMState( const int& pichrt )
     cohort[pichrt].prevy[i] = MISSING;
   }
 
+  cohort[pichrt].dgppdrootc = ZERO;
+  cohort[pichrt].soninput = ZERO;
+  cohort[pichrt].toptmic = ZERO;
+  cohort[pichrt].yrallocseedc = ZERO;
   cohort[pichrt].aggrowdd = MISSING;
 
   cohort[pichrt].agkd = MISSING;
@@ -925,6 +884,7 @@ void Telm45::initializeCohortTEMState( const int& pichrt )
   cohort[pichrt].yrproot = MISSING;
 //  BSF added yrpseed
   cohort[pichrt].yrpseed = MISSING;
+
   
   cohort[pichrt].yralloclc = MISSING;
   cohort[pichrt].yrallocsc = MISSING;
@@ -943,482 +903,485 @@ void Telm45::initializeCohortTEMState( const int& pichrt )
 /* *************************************************************
 ************************************************************* */
 
-void Telm45::outputTEMmonth( const int& pdm )
+void Telm45::outputTEMmonth( const int& pdm, const int& ichrt )
 {
 
   // Ecosystem carbon pools determined in integrator
 
-  output[tem.I_LEAFC][pdm] = tem.getY( tem.I_LEAFC );
+  output[ichrt][tem.I_LEAFC][pdm] = tem.getY( tem.I_LEAFC );
 
-  output[tem.I_SAPWOODC][pdm] = tem.getY( tem.I_SAPWOODC );
+  output[ichrt][tem.I_SAPWOODC][pdm] = tem.getY( tem.I_SAPWOODC );
 
-  output[tem.I_HEARTWOODC][pdm] = tem.getY( tem.I_HEARTWOODC );
+  output[ichrt][tem.I_HEARTWOODC][pdm] = tem.getY( tem.I_HEARTWOODC );
 
-  output[tem.I_ROOTC][pdm] = tem.getY( tem.I_ROOTC );
+  output[ichrt][tem.I_ROOTC][pdm] = tem.getY( tem.I_ROOTC );
 
-  output[tem.I_SEEDC][pdm] = tem.getY( tem.I_SEEDC );
+  output[ichrt][tem.I_SEEDC][pdm] = tem.getY( tem.I_SEEDC );
 
-  output[tem.I_LABILEC][pdm] = tem.getY( tem.I_LABILEC );
+  output[ichrt][tem.I_LABILEC][pdm] = tem.getY( tem.I_LABILEC );
 
-  output[tem.I_SOLC][pdm] = tem.getY( tem.I_SOLC );
+  output[ichrt][tem.I_SOLC][pdm] = tem.getY( tem.I_SOLC );
 
   // Ecosystem nitrogen pools determined in integrator
 
-  output[tem.I_LEAFN][pdm] = tem.getY( tem.I_LEAFN );
+  output[ichrt][tem.I_LEAFN][pdm] = tem.getY( tem.I_LEAFN );
 
-  output[tem.I_SAPWOODN][pdm] = tem.getY( tem.I_SAPWOODN );
+  output[ichrt][tem.I_SAPWOODN][pdm] = tem.getY( tem.I_SAPWOODN );
 
-  output[tem.I_HEARTWOODN][pdm] = tem.getY( tem.I_HEARTWOODN );
+  output[ichrt][tem.I_HEARTWOODN][pdm] = tem.getY( tem.I_HEARTWOODN );
 
-  output[tem.I_ROOTN][pdm] = tem.getY( tem.I_ROOTN );
+  output[ichrt][tem.I_ROOTN][pdm] = tem.getY( tem.I_ROOTN );
 
-  output[tem.I_SEEDN][pdm] = tem.getY( tem.I_SEEDN );
+  output[ichrt][tem.I_SEEDN][pdm] = tem.getY( tem.I_SEEDN );
 
-  output[tem.I_LABILEN][pdm] = tem.getY( tem.I_LABILEN );
+  output[ichrt][tem.I_LABILEN][pdm] = tem.getY( tem.I_LABILEN );
 
-  output[tem.I_SOLN][pdm] = tem.getY( tem.I_SOLN );
+  output[ichrt][tem.I_SOLN][pdm] = tem.getY( tem.I_SOLN );
 
-  output[tem.I_AVLN][pdm] = tem.getY( tem.I_AVLN );
+  output[ichrt][tem.I_AVLN][pdm] = tem.getY( tem.I_AVLN );
 
 
   // Ecosystem water pools determined in integrator
 
-  output[tem.I_AVLW][pdm] = tem.getY( tem.I_SM ) - tem.soil.getWILTPT();
+  output[ichrt][tem.I_AVLW][pdm] = tem.getY( tem.I_SM ) - tem.soil.getWILTPT();
 
-  if( output[tem.I_AVLW][pdm] < ZERO ) {
-    output[tem.I_AVLW][pdm] = 0.;
+  if( output[ichrt][tem.I_AVLW][pdm] < ZERO ) {
+    output[ichrt][tem.I_AVLW][pdm] = 0.;
   }
 
-  output[tem.I_SM][pdm] = tem.getY( tem.I_SM );
+  output[ichrt][tem.I_SM][pdm] = tem.getY( tem.I_SM );
 
-  output[tem.I_VSM][pdm] = tem.getY( tem.I_VSM );
+  output[ichrt][tem.I_VSM][pdm] = tem.getY( tem.I_VSM );
 
-  output[tem.I_PCTP][pdm] = tem.getY( tem.I_PCTP );
+  output[ichrt][tem.I_PCTP][pdm] = tem.getY( tem.I_PCTP );
 
-  output[tem.I_RGRW][pdm] = tem.getY( tem.I_RGRW );
+  output[ichrt][tem.I_RGRW][pdm] = tem.getY( tem.I_RGRW );
 
-  output[tem.I_SGRW][pdm] = tem.getY(tem.I_SGRW );
+  output[ichrt][tem.I_SGRW][pdm] = tem.getY(tem.I_SGRW );
 
   // Monthly phenology determined in integrator
 
-  output[tem.I_FPC][pdm] = tem.getY( tem.I_FPC );
+  output[ichrt][tem.I_FPC][pdm] = tem.getY( tem.I_FPC );
 
   // Monthly carbon fluxes in ecosystems determined in integrator
 
-  output[tem.I_INGPP][pdm] = tem.getY( tem.I_INGPP );
+  output[ichrt][tem.I_INGPP][pdm] = tem.getY( tem.I_INGPP );
 
-  output[tem.I_GPP][pdm] = tem.getY( tem.I_GPP );
+  output[ichrt][tem.I_GPP][pdm] = tem.getY( tem.I_GPP );
 
-  output[tem.I_FOZONE][pdm] = tem.getY( tem.I_FOZONE );
-  output[tem.I_FRDL][pdm] = tem.getY( tem.I_FRDL );
-  output[tem.I_FCO2][pdm] = tem.getY( tem.I_FCO2 );
-  output[tem.I_TEMP][pdm] = tem.getY( tem.I_TEMP );
-  output[tem.I_FH2O][pdm] = tem.getY( tem.I_FH2O );
-  output[tem.I_FO3][pdm] = tem.getY( tem.I_FO3 );
+  output[ichrt][tem.I_FOZONE][pdm] = tem.getY( tem.I_FOZONE );
+  output[ichrt][tem.I_FRDL][pdm] = tem.getY( tem.I_FRDL );
+  output[ichrt][tem.I_FCO2][pdm] = tem.getY( tem.I_FCO2 );
+  output[ichrt][tem.I_TEMP][pdm] = tem.getY( tem.I_TEMP );
+  output[ichrt][tem.I_FH2O][pdm] = tem.getY( tem.I_FH2O );
+  output[ichrt][tem.I_FO3][pdm] = tem.getY( tem.I_FO3 );
 
-//  output[tem.I_INNPP][pdm] = tem.getY( tem.I_INNPP );
-  output[tem.I_INNPP][pdm] = tem.veg.getINNPP();
+//  output[ichrt][tem.I_INNPP][pdm] = tem.getY( tem.I_INNPP );
+  output[ichrt][tem.I_INNPP][pdm] = tem.veg.getINNPP();
 
-//  output[tem.I_NPP][pdm] = tem.getY( tem.I_NPP );
-  output[tem.I_NPP][pdm] = tem.veg.getNPP();
+//  output[ichrt][tem.I_NPP][pdm] = tem.getY( tem.I_NPP );
+  output[ichrt][tem.I_NPP][pdm] = tem.veg.getNPP();
 
-//  output[tem.I_GPR][pdm] = tem.getY( tem.I_GPR );
-  output[tem.I_GPR][pdm] = tem.veg.getGPR();
+//  output[ichrt][tem.I_GPR][pdm] = tem.getY( tem.I_GPR );
+  output[ichrt][tem.I_GPR][pdm] = tem.veg.getGPR();
 
-  output[tem.I_ALLOCLC][pdm] = tem.getY( tem.I_ALLOCLC );
+  output[ichrt][tem.I_ALLOCLC][pdm] = tem.getY( tem.I_ALLOCLC );
 
-  output[tem.I_ALLOCSC][pdm] = tem.getY( tem.I_ALLOCSC );
+  output[ichrt][tem.I_ALLOCSC][pdm] = tem.getY( tem.I_ALLOCSC );
 
-  output[tem.I_ALLOCHC][pdm] = tem.getY( tem.I_ALLOCHC );
+  output[ichrt][tem.I_ALLOCHC][pdm] = tem.getY( tem.I_ALLOCHC );
 
-  output[tem.I_ALLOCRC][pdm] = tem.getY( tem.I_ALLOCRC );
+  output[ichrt][tem.I_ALLOCRC][pdm] = tem.getY( tem.I_ALLOCRC );
 
-  output[tem.I_ALLOCSEEDC][pdm] = tem.getY( tem.I_ALLOCSEEDC );
+  output[ichrt][tem.I_ALLOCSEEDC][pdm] = tem.getY( tem.I_ALLOCSEEDC );
 
-  output[tem.I_RVMNT][pdm] = tem.getY( tem.I_RVMNT );
+  output[ichrt][tem.I_RVMNT][pdm] = tem.getY( tem.I_RVMNT );
 
-  output[tem.I_RMLEAF][pdm] = tem.getY( tem.I_RMLEAF );
+  output[ichrt][tem.I_RMLEAF][pdm] = tem.getY( tem.I_RMLEAF );
 
-  output[tem.I_RMSAPWOOD][pdm] = tem.getY( tem.I_RMSAPWOOD );
+  output[ichrt][tem.I_RMSAPWOOD][pdm] = tem.getY( tem.I_RMSAPWOOD );
 
-  output[tem.I_RMROOT][pdm] = tem.getY( tem.I_RMROOT );
+  output[ichrt][tem.I_RMROOT][pdm] = tem.getY( tem.I_RMROOT );
 
-  output[tem.I_RMSEED][pdm] = tem.getY( tem.I_RMSEED );
+  output[ichrt][tem.I_RMSEED][pdm] = tem.getY( tem.I_RMSEED );
 
-  output[tem.I_RMLABILE][pdm] = tem.getY( tem.I_RMLABILE );
+  output[ichrt][tem.I_RMLABILE][pdm] = tem.getY( tem.I_RMLABILE );
 
-  output[tem.I_RVGRW][pdm] = tem.getY( tem.I_RVGRW );
+  output[ichrt][tem.I_RVGRW][pdm] = tem.getY( tem.I_RVGRW );
 
-  output[tem.I_LTRLC][pdm] = tem.getY( tem.I_LTRLC );
+  output[ichrt][tem.I_LTRLC][pdm] = tem.getY( tem.I_LTRLC );
 
-  output[tem.I_LTRSC][pdm] = tem.getY( tem.I_LTRSC );
+  output[ichrt][tem.I_LTRSC][pdm] = tem.getY( tem.I_LTRSC );
 
-  output[tem.I_LTRHC][pdm] = tem.getY( tem.I_LTRHC );
+  output[ichrt][tem.I_LTRHC][pdm] = tem.getY( tem.I_LTRHC );
 
-  output[tem.I_LTRRC][pdm] = tem.getY( tem.I_LTRRC );
+  output[ichrt][tem.I_LTRRC][pdm] = tem.getY( tem.I_LTRRC );
 
-  output[tem.I_LTRSEEDC][pdm] = tem.getY( tem.I_LTRSEEDC );
+  output[ichrt][tem.I_LTRSEEDC][pdm] = tem.getY( tem.I_LTRSEEDC );
 
-  output[tem.I_RH][pdm] = tem.getY( tem.I_RH );
+  output[ichrt][tem.I_RH][pdm] = tem.getY( tem.I_RH );
 
-  output[tem.I_DOC][pdm] = tem.getY( tem.I_DOC );
+  output[ichrt][tem.I_DOC][pdm] = tem.getY( tem.I_DOC );
 
-  output[tem.I_DON][pdm] = tem.getY( tem.I_DON );
+  output[ichrt][tem.I_DON][pdm] = tem.getY( tem.I_DON );
 
 
   // Monthly nitrogen fluxes in ecosystems determined in
   //   integrator
 
-  output[tem.I_NINP][pdm] = tem.getY( tem.I_NINP );
+  output[ichrt][tem.I_NINP][pdm] = tem.getY( tem.I_NINP );
 
-  output[tem.I_AGFRTN][pdm] = tem.getY( tem.I_AGFRTN );
+  output[ichrt][tem.I_AGFRTN][pdm] = tem.getY( tem.I_AGFRTN );
 
-  output[tem.I_INNUP][pdm] = tem.getY( tem.I_INNUP );
+  output[ichrt][tem.I_INNUP][pdm] = tem.getY( tem.I_INNUP );
 
-  output[tem.I_VNUP][pdm] = tem.getY( tem.I_VNUP );
+  output[ichrt][tem.I_VNUP][pdm] = tem.getY( tem.I_VNUP );
 
-  output[tem.I_ALLOCLN][pdm] = tem.getY( tem.I_ALLOCLN );
+  output[ichrt][tem.I_ALLOCLN][pdm] = tem.getY( tem.I_ALLOCLN );
 
-  output[tem.I_ALLOCSN][pdm] = tem.getY( tem.I_ALLOCSN );
+  output[ichrt][tem.I_ALLOCSN][pdm] = tem.getY( tem.I_ALLOCSN );
 
-  output[tem.I_ALLOCHN][pdm] = tem.getY( tem.I_ALLOCHN );
+  output[ichrt][tem.I_ALLOCHN][pdm] = tem.getY( tem.I_ALLOCHN );
 
-  output[tem.I_ALLOCRN][pdm] = tem.getY( tem.I_ALLOCRN );
+  output[ichrt][tem.I_ALLOCRN][pdm] = tem.getY( tem.I_ALLOCRN );
 
-  output[tem.I_ALLOCSEEDN][pdm] = tem.getY( tem.I_ALLOCSEEDN );
+  output[ichrt][tem.I_ALLOCSEEDN][pdm] = tem.getY( tem.I_ALLOCSEEDN );
 
-  output[tem.I_LTRLN][pdm] = tem.getY( tem.I_LTRLN );
+  output[ichrt][tem.I_LTRLN][pdm] = tem.getY( tem.I_LTRLN );
 
-  output[tem.I_LTRSN][pdm] = tem.getY( tem.I_LTRSN );
+  output[ichrt][tem.I_LTRSN][pdm] = tem.getY( tem.I_LTRSN );
 
-  output[tem.I_LTRHN][pdm] = tem.getY( tem.I_LTRHN );
+  output[ichrt][tem.I_LTRHN][pdm] = tem.getY( tem.I_LTRHN );
 
-  output[tem.I_LTRRN][pdm] = tem.getY( tem.I_LTRRN );
+  output[ichrt][tem.I_LTRRN][pdm] = tem.getY( tem.I_LTRRN );
 
-  output[tem.I_LTRSEEDN][pdm] = tem.getY( tem.I_LTRSEEDN );
+  output[ichrt][tem.I_LTRSEEDN][pdm] = tem.getY( tem.I_LTRSEEDN );
 
-  output[tem.I_MNUP][pdm] = tem.getY( tem.I_MNUP );
+  output[ichrt][tem.I_MNUP][pdm] = tem.getY( tem.I_MNUP );
 
-  output[tem.I_NMIN][pdm] = tem.getY( tem.I_NMIN );
+  output[ichrt][tem.I_NMIN][pdm] = tem.getY( tem.I_NMIN );
 
-  output[tem.I_NLST][pdm] = tem.getY( tem.I_NLST );
+  output[ichrt][tem.I_NLST][pdm] = tem.getY( tem.I_NLST );
 
-  output[tem.I_LCHDON][pdm] = tem.getY( tem.I_LCHDON );
+  output[ichrt][tem.I_LCHDON][pdm] = tem.getY( tem.I_LCHDON );
 
-  output[tem.I_LCHDIN][pdm] = tem.getY( tem.I_LCHDIN );
+  output[ichrt][tem.I_LCHDIN][pdm] = tem.getY( tem.I_LCHDIN );
 
-  output[tem.I_LCHDOC][pdm] = tem.getY( tem.I_LCHDOC );
+  output[ichrt][tem.I_LCHDOC][pdm] = tem.getY( tem.I_LCHDOC );
 
-  output[tem.I_DONPROD][pdm] = tem.getY( tem.I_DONPROD );
+  output[ichrt][tem.I_DONPROD][pdm] = tem.getY( tem.I_DONPROD );
 
-  output[tem.I_DOCPROD][pdm] = tem.getY( tem.I_DOCPROD );
+  output[ichrt][tem.I_DOCPROD][pdm] = tem.getY( tem.I_DOCPROD );
 
-  output[tem.I_NFIXN][pdm] = tem.getY( tem.I_NFIXN );
+  output[ichrt][tem.I_NFIXN][pdm] = tem.getY( tem.I_NFIXN );
 
-  output[tem.I_NFIXS][pdm] = tem.getY( tem.I_NFIXS );
+  output[ichrt][tem.I_NFIXS][pdm] = tem.getY( tem.I_NFIXS );
 
-  output[tem.I_NRESORBL][pdm] = tem.getY( tem.I_NRESORBL );
+  output[ichrt][tem.I_NRESORBL][pdm] = tem.getY( tem.I_NRESORBL );
 
-  output[tem.I_NRESORBS][pdm] = tem.getY( tem.I_NRESORBS );
+  output[ichrt][tem.I_NRESORBS][pdm] = tem.getY( tem.I_NRESORBS );
 
-  output[tem.I_NRESORBR][pdm] = tem.getY( tem.I_NRESORBR );
+  output[ichrt][tem.I_NRESORBR][pdm] = tem.getY( tem.I_NRESORBR );
 
-  output[tem.I_NRESORBSEED][pdm] = tem.getY( tem.I_NRESORBSEED );
+  output[ichrt][tem.I_NRESORBSEED][pdm] = tem.getY( tem.I_NRESORBSEED );
 
 
 
   // Monthly water fluxes in ecosystems
 
-  output[tem.I_AGIRRIG][pdm] = tem.getY( tem.I_AGIRRIG );
+  output[ichrt][tem.I_AGIRRIG][pdm] = tem.getY( tem.I_AGIRRIG );
 
-  output[tem.I_INEET][pdm] = tem.getY( tem.I_INEET );
+  output[ichrt][tem.I_INEET][pdm] = tem.getY( tem.I_INEET );
 
-  output[tem.I_EET][pdm] = tem.getY( tem.I_EET );
+  output[ichrt][tem.I_EET][pdm] = tem.getY( tem.I_EET );
 
-  output[tem.I_RPERC][pdm] = tem.getY( tem.I_RPERC );
+  output[ichrt][tem.I_RPERC][pdm] = tem.getY( tem.I_RPERC );
 
-  output[tem.I_SPERC][pdm] = tem.getY( tem.I_SPERC );
+  output[ichrt][tem.I_SPERC][pdm] = tem.getY( tem.I_SPERC );
 
-  output[tem.I_RRUN][pdm] = tem.getY( tem.I_RRUN );
+  output[ichrt][tem.I_RRUN][pdm] = tem.getY( tem.I_RRUN );
 
-  output[tem.I_SRUN][pdm] = tem.getY( tem.I_SRUN );
+  output[ichrt][tem.I_SRUN][pdm] = tem.getY( tem.I_SRUN );
 
-  output[tem.I_GC][pdm] = tem.getY( tem.I_GC );
+  output[ichrt][tem.I_GC][pdm] = tem.getY( tem.I_GC );
 
-  output[tem.I_GS][pdm] = tem.getY( tem.I_GS );
+  output[ichrt][tem.I_GS][pdm] = tem.getY( tem.I_GS );
 
-  output[tem.I_PECAN][pdm] = tem.veg.getPECANW();
+  output[ichrt][tem.I_PECAN][pdm] = tem.veg.getPECANW();
 
-  output[tem.I_PESOIL][pdm] = tem.veg.getPESOILW();
+  output[ichrt][tem.I_PESOIL][pdm] = tem.veg.getPESOILW();
 
 
   // Other ecosystem carbon pools
 
-  output[tem.I_LAI][pdm] = tem.getY( tem.I_LAI );
+  output[ichrt][tem.I_LAI][pdm] = tem.getY( tem.I_LAI );
 
-  output[tem.I_TOTEC][pdm] = tem.ag.getTOTEC();
+  output[ichrt][tem.I_TOTEC][pdm] = tem.ag.getTOTEC();
 
-  output[tem.I_TOTC][pdm] = tem.veg.getVEGC();
+  output[ichrt][tem.I_TOTC][pdm] = tem.veg.getVEGC();
 
   // Other ecosystem nitrogen pools
 
-  output[tem.I_VEGN][pdm] = tem.veg.getVEGN();
+  output[ichrt][tem.I_VEGN][pdm] = tem.veg.getVEGN();
 
 
   // Other ecosystem water pools
 
-  output[tem.I_SNWPCK][pdm] = tem.soil.getSNOWPACK();
+  output[ichrt][tem.I_SNWPCK][pdm] = tem.soil.getSNOWPACK();
 
   // Other monthly carbon fluxes in ecosystems
 
-  output[tem.I_NEP][pdm] = tem.getNEP();
+  output[ichrt][tem.I_NEP][pdm] = tem.getNEP();
 
-  output[tem.I_NCE][pdm] = tem.getNCE();
+  output[ichrt][tem.I_NCE][pdm] = tem.getNCE();
 
-  output[tem.I_NBP][pdm] = tem.getNBP();
+  output[ichrt][tem.I_NBP][pdm] = tem.getNBP();
 
 
   // Other monthly water fluxes in ecosystems
 
-  output[tem.I_PET][pdm] = tem.veg.getPET();
+  output[ichrt][tem.I_PET][pdm] = tem.veg.getPET();
 
-  output[tem.I_SNWINF][pdm] = tem.soil.getSNOWINF();
+  output[ichrt][tem.I_SNWINF][pdm] = tem.soil.getSNOWINF();
 
-  output[tem.I_WYLD][pdm] = tem.soil.getH2OYLD();
+  output[ichrt][tem.I_WYLD][pdm] = tem.soil.getH2OYLD();
 
 
 
   // Carbon in Human product pools
 
-  output[tem.I_AGPRDC][pdm] = tem.ag.getPROD1C();
+  output[ichrt][tem.I_AGPRDC][pdm] = tem.ag.getPROD1C();
 
-  output[tem.I_CLIPPINGS][pdm] = tem.ag.getCLIPPINGS();
+  output[ichrt][tem.I_CLIPPINGS][pdm] = tem.ag.getCLIPPINGS();
 
-  output[tem.I_PROD10C][pdm] = tem.ag.getPROD10C();
+  output[ichrt][tem.I_PROD10C][pdm] = tem.ag.getPROD10C();
 
-  output[tem.I_PROD100C][pdm] = tem.ag.getPROD100C();
+  output[ichrt][tem.I_PROD100C][pdm] = tem.ag.getPROD100C();
 
-  output[tem.I_TOTPRDC][pdm] = tem.ag.getTOTPRODC();
+  output[ichrt][tem.I_TOTPRDC][pdm] = tem.ag.getTOTPRODC();
 
   // Carbon in crop residue pool
 
-  output[tem.I_RESIDC][pdm] = tem.ag.getCROPRESIDUEC();
+  output[ichrt][tem.I_RESIDC][pdm] = tem.ag.getCROPRESIDUEC();
 
-  output[tem.I_AGSTUBC][pdm] = tem.ag.getSTUBBLEC();
+  output[ichrt][tem.I_AGSTUBC][pdm] = tem.ag.getSTUBBLEC();
 
   // Nitrogen in Human product pools
 
-  output[tem.I_AGPRDN][pdm] = tem.ag.getPROD1N();
+  output[ichrt][tem.I_AGPRDN][pdm] = tem.ag.getPROD1N();
 
-  output[tem.I_PROD10N][pdm] = tem.ag.getPROD10N();
+  output[ichrt][tem.I_PROD10N][pdm] = tem.ag.getPROD10N();
 
-  output[tem.I_PROD100N][pdm] = tem.ag.getPROD100N();
+  output[ichrt][tem.I_PROD100N][pdm] = tem.ag.getPROD100N();
 
-  output[tem.I_TOTPRDN][pdm] = tem.ag.getTOTPRODN();
+  output[ichrt][tem.I_TOTPRDN][pdm] = tem.ag.getTOTPRODN();
 
   // Nitrogen in crop residue pool
 
-  output[tem.I_RESIDN][pdm] = tem.ag.getCROPRESIDUEN();
+  output[ichrt][tem.I_RESIDN][pdm] = tem.ag.getCROPRESIDUEN();
 
-  output[tem.I_AGSTUBN][pdm] = tem.ag.getSTUBBLEN();
+  output[ichrt][tem.I_AGSTUBN][pdm] = tem.ag.getSTUBBLEN();
 
   // Monthly carbon fluxes associated with
   //  agricultural conversion
 
-  output[tem.I_CNVRTC][pdm] = tem.ag.getCONVRTFLXC();
+  output[ichrt][tem.I_CNVRTC][pdm] = tem.ag.getCONVRTFLXC();
 
-  output[tem.I_VCNVRTC][pdm] = tem.ag.getVCONVRTFLXC();
+  output[ichrt][tem.I_VCNVRTC][pdm] = tem.ag.getVCONVRTFLXC();
 
-  output[tem.I_SCNVRTC][pdm] = tem.ag.getSCONVRTFLXC();
+  output[ichrt][tem.I_SCNVRTC][pdm] = tem.ag.getSCONVRTFLXC();
 
-  output[tem.I_SLASHC][pdm] = tem.ag.getSLASHC();
+  output[ichrt][tem.I_SLASHC][pdm] = tem.ag.getSLASHC();
 
-  output[tem.I_STANDDEADC][pdm] = tem.ag.getSTANDDEADC();
+  output[ichrt][tem.I_STANDDEADC][pdm] = tem.ag.getSTANDDEADC();
 
-  output[tem.I_VOLAC][pdm] = tem.ag.getVOLAC();
+  output[ichrt][tem.I_VOLAC][pdm] = tem.ag.getVOLAC();
 
-  output[tem.I_CFLX][pdm] = tem.ag.getCFLUX();
+  output[ichrt][tem.I_CFLX][pdm] = tem.ag.getCFLUX();
 
   // Monthly nitrogen fluxes associated with
   //  agricultural conversion
 
-  output[tem.I_CNVRTN][pdm] = tem.ag.getCONVRTFLXN();
+  output[ichrt][tem.I_CNVRTN][pdm] = tem.ag.getCONVRTFLXN();
 
-  output[tem.I_VCNVRTN][pdm] = tem.ag.getVCONVRTFLXN();
+  output[ichrt][tem.I_VCNVRTN][pdm] = tem.ag.getVCONVRTFLXN();
 
-  output[tem.I_SCNVRTN][pdm] = tem.ag.getSCONVRTFLXN();
+  output[ichrt][tem.I_SCNVRTN][pdm] = tem.ag.getSCONVRTFLXN();
 
-  output[tem.I_SLASHN][pdm] = tem.ag.getSLASHN();
+  output[ichrt][tem.I_SLASHN][pdm] = tem.ag.getSLASHN();
 
-  output[tem.I_STANDDEADN][pdm] = tem.ag.getSTANDDEADN();
+  output[ichrt][tem.I_STANDDEADN][pdm] = tem.ag.getSTANDDEADN();
 
-  output[tem.I_VOLAN][pdm] = tem.ag.getVOLAN();
+  output[ichrt][tem.I_VOLAN][pdm] = tem.ag.getVOLAN();
+  output[ichrt][tem.I_AREABURN][pdm] = tem.fire.getBURNED_AREA();
+  output[ichrt][tem.I_POTEVAP][pdm] = tem.veg.getPOTEVAP();
+  output[ichrt][tem.I_ACTEVAP][pdm] = tem.veg.getACTEVAP();
 
-  output[tem.I_NRETNT][pdm] = tem.ag.getNRETENT();
+  output[ichrt][tem.I_NRETNT][pdm] = tem.ag.getNRETENT();
 
-  output[tem.I_NVRTNT][pdm] = tem.ag.getNVRETENT();
+  output[ichrt][tem.I_NVRTNT][pdm] = tem.ag.getNVRETENT();
 
-  output[tem.I_NSRTNT][pdm] = tem.ag.getNSRETENT();
+  output[ichrt][tem.I_NSRTNT][pdm] = tem.ag.getNSRETENT();
 
   // Monthly carbon and nitrogen fluxes from agricultural
   //   ecosystems
 
-  output[tem.I_AGFPRDC][pdm] = tem.ag.getCROPPRODC();
-  output[tem.I_AGFPRDN][pdm] = tem.ag.getCROPPRODN();
+  output[ichrt][tem.I_AGFPRDC][pdm] = tem.ag.getCROPPRODC();
+  output[ichrt][tem.I_AGFPRDN][pdm] = tem.ag.getCROPPRODN();
 
-  output[tem.I_FRESIDC][pdm] = tem.ag.getFORMCROPRESIDUEC();
-  output[tem.I_FRESIDN][pdm] = tem.ag.getFORMCROPRESIDUEN();
+  output[ichrt][tem.I_FRESIDC][pdm] = tem.ag.getFORMCROPRESIDUEC();
+  output[ichrt][tem.I_FRESIDN][pdm] = tem.ag.getFORMCROPRESIDUEN();
 
-  output[tem.I_AGPRDFC][pdm] = tem.ag.getPROD1DECAYC();
-  output[tem.I_AGPRDFN][pdm] = tem.ag.getPROD1DECAYN();
+  output[ichrt][tem.I_AGPRDFC][pdm] = tem.ag.getPROD1DECAYC();
+  output[ichrt][tem.I_AGPRDFN][pdm] = tem.ag.getPROD1DECAYN();
 
-  output[tem.I_RESIDFC][pdm] = tem.ag.getCROPRESIDUEFLXC();
-  output[tem.I_RESIDFN][pdm] = tem.ag.getCROPRESIDUEFLXN();
+  output[ichrt][tem.I_RESIDFC][pdm] = tem.ag.getCROPRESIDUEFLXC();
+  output[ichrt][tem.I_RESIDFN][pdm] = tem.ag.getCROPRESIDUEFLXN();
 
 
   // Monthly carbon and nitrogen fluxes from products
 
-  output[tem.I_PRDF10C][pdm] = tem.ag.getFORMPROD10C();
-  output[tem.I_PRDF10N][pdm] = tem.ag.getFORMPROD10N();
+  output[ichrt][tem.I_PRDF10C][pdm] = tem.ag.getFORMPROD10C();
+  output[ichrt][tem.I_PRDF10N][pdm] = tem.ag.getFORMPROD10N();
 
-  output[tem.I_PRD10FC][pdm] = tem.ag.getPROD10DECAYC();
-  output[tem.I_PRD10FN][pdm] = tem.ag.getPROD10DECAYN();
+  output[ichrt][tem.I_PRD10FC][pdm] = tem.ag.getPROD10DECAYC();
+  output[ichrt][tem.I_PRD10FN][pdm] = tem.ag.getPROD10DECAYN();
 
-  output[tem.I_PRDF100C][pdm] = tem.ag.getFORMPROD100C();
-  output[tem.I_PRDF100N][pdm] = tem.ag.getFORMPROD100N();
+  output[ichrt][tem.I_PRDF100C][pdm] = tem.ag.getFORMPROD100C();
+  output[ichrt][tem.I_PRDF100N][pdm] = tem.ag.getFORMPROD100N();
 
-  output[tem.I_PRD100FC][pdm] = tem.ag.getPROD100DECAYC();
-  output[tem.I_PRD100FN][pdm] = tem.ag.getPROD100DECAYN();
+  output[ichrt][tem.I_PRD100FC][pdm] = tem.ag.getPROD100DECAYC();
+  output[ichrt][tem.I_PRD100FN][pdm] = tem.ag.getPROD100DECAYN();
 
-  output[tem.I_TOTFPRDC][pdm] = tem.ag.getFORMTOTPRODC();
-  output[tem.I_TOTFPRDN][pdm] = tem.ag.getFORMTOTPRODN();
+  output[ichrt][tem.I_TOTFPRDC][pdm] = tem.ag.getFORMTOTPRODC();
+  output[ichrt][tem.I_TOTFPRDN][pdm] = tem.ag.getFORMTOTPRODN();
 
-  output[tem.I_TOTPRDFC][pdm] = tem.ag.getTOTPRODDECAYC();
-  output[tem.I_TOTPRDFN][pdm] = tem.ag.getTOTPRODDECAYN();
+  output[ichrt][tem.I_TOTPRDFC][pdm] = tem.ag.getTOTPRODDECAYC();
+  output[ichrt][tem.I_TOTPRDFN][pdm] = tem.ag.getTOTPRODDECAYN();
 
   //  Output agricultural area-specific vs natural area-specific
   //    results
 
   if( 0 == tem.ag.state )
   {
-    output[tem.I_CROPC][pdm] = ZERO;
-    output[tem.I_NATVEGC][pdm] = tem.getY( tem.I_LEAFC ) + tem.getY( tem.I_SAPWOODC )
+    output[ichrt][tem.I_CROPC][pdm] = ZERO;
+    output[ichrt][tem.I_NATVEGC][pdm] = tem.getY( tem.I_LEAFC ) + tem.getY( tem.I_SAPWOODC )
 		+ tem.getY( tem.I_HEARTWOODC ) + tem.getY( tem.I_ROOTC ) + tem.getY( tem.I_LABILEC );
 
-    output[tem.I_CROPN][pdm] = ZERO;
-    output[tem.I_NATVEGN][pdm] = tem.getY( tem.I_LEAFN ) + tem.getY( tem.I_SAPWOODN )
+    output[ichrt][tem.I_CROPN][pdm] = ZERO;
+    output[ichrt][tem.I_NATVEGN][pdm] = tem.getY( tem.I_LEAFN ) + tem.getY( tem.I_SAPWOODN )
 		+ tem.getY( tem.I_HEARTWOODN ) + tem.getY( tem.I_ROOTN ) + tem.getY( tem.I_LABILEN );
 
-    output[tem.I_CSTRN][pdm] = ZERO;
-    output[tem.I_NATSTRN][pdm] = ZERO;
+    output[ichrt][tem.I_CSTRN][pdm] = ZERO;
+    output[ichrt][tem.I_NATSTRN][pdm] = ZERO;
 
-    output[tem.I_CSTON][pdm] = ZERO;
-    output[tem.I_NATSTON][pdm] = tem.getY( tem.I_LABILEN );
+    output[ichrt][tem.I_CSTON][pdm] = ZERO;
+    output[ichrt][tem.I_NATSTON][pdm] = tem.getY( tem.I_LABILEN );
 
-    output[tem.I_CROPLAI][pdm] = ZERO;
-    output[tem.I_NATLAI][pdm] = tem.getY( tem.I_LAI );
+    output[ichrt][tem.I_CROPLAI][pdm] = ZERO;
+    output[ichrt][tem.I_NATLAI][pdm] = tem.getY( tem.I_LAI );
 
-    output[tem.I_CROPFPC][pdm] = ZERO;
-    output[tem.I_NATFPC][pdm] = tem.getY( tem.I_FPC );
+    output[ichrt][tem.I_CROPFPC][pdm] = ZERO;
+    output[ichrt][tem.I_NATFPC][pdm] = tem.getY( tem.I_FPC );
 
-    output[tem.I_AGINGPP][pdm] = ZERO;
-    output[tem.I_NATINGPP][pdm] = tem.getY( tem.I_INGPP );
+    output[ichrt][tem.I_AGINGPP][pdm] = ZERO;
+    output[ichrt][tem.I_NATINGPP][pdm] = tem.getY( tem.I_INGPP );
 
-    output[tem.I_AGGPP][pdm] = ZERO;
-    output[tem.I_NATGPP][pdm] = tem.getY( tem.I_GPP );
+    output[ichrt][tem.I_AGGPP][pdm] = ZERO;
+    output[ichrt][tem.I_NATGPP][pdm] = tem.getY( tem.I_GPP );
 
-    output[tem.I_AGINNPP][pdm] = ZERO;
-//    output[tem.I_NATINNPP][pdm] = tem.getY( tem.I_INNPP );
-    output[tem.I_NATINNPP][pdm] = tem.veg.getINNPP();
+    output[ichrt][tem.I_AGINNPP][pdm] = ZERO;
+//    output[ichrt][tem.I_NATINNPP][pdm] = tem.getY( tem.I_INNPP );
+    output[ichrt][tem.I_NATINNPP][pdm] = tem.veg.getINNPP();
 
-    output[tem.I_AGNPP][pdm] = ZERO;
-//    output[tem.I_NATNPP][pdm] = tem.getY( tem.I_NPP );
-    output[tem.I_NATNPP][pdm] = tem.veg.getNPP();
+    output[ichrt][tem.I_AGNPP][pdm] = ZERO;
+//    output[ichrt][tem.I_NATNPP][pdm] = tem.getY( tem.I_NPP );
+    output[ichrt][tem.I_NATNPP][pdm] = tem.veg.getNPP();
 
-    output[tem.I_AGGPR][pdm] = ZERO;
-//    output[tem.I_NATGPR][pdm] = tem.getY( tem.I_GPR );
-    output[tem.I_NATGPR][pdm] = tem.veg.getGPR();
+    output[ichrt][tem.I_AGGPR][pdm] = ZERO;
+//    output[ichrt][tem.I_NATGPR][pdm] = tem.getY( tem.I_GPR );
+    output[ichrt][tem.I_NATGPR][pdm] = tem.veg.getGPR();
 
-    output[tem.I_AGRVMNT][pdm] = ZERO;
-    output[tem.I_NATRVMNT][pdm] = tem.getY( tem.I_RVMNT );
+    output[ichrt][tem.I_AGRVMNT][pdm] = ZERO;
+    output[ichrt][tem.I_NATRVMNT][pdm] = tem.getY( tem.I_RVMNT );
 
-    output[tem.I_AGRVGRW][pdm] = ZERO;
-    output[tem.I_NATRVGRW][pdm] = tem.getY( tem.I_RVGRW );
+    output[ichrt][tem.I_AGRVGRW][pdm] = ZERO;
+    output[ichrt][tem.I_NATRVGRW][pdm] = tem.getY( tem.I_RVGRW );
 
-    output[tem.I_AGLTRC][pdm] = ZERO;
-    output[tem.I_NATLTRC][pdm] = tem.getY( tem.I_RVGRW );
+    output[ichrt][tem.I_AGLTRC][pdm] = ZERO;
+    output[ichrt][tem.I_NATLTRC][pdm] = tem.getY( tem.I_RVGRW );
 
-    output[tem.I_AGINNUP][pdm] = ZERO;
-    output[tem.I_NATINNUP][pdm] = tem.getY( tem.I_INNUP );
+    output[ichrt][tem.I_AGINNUP][pdm] = ZERO;
+    output[ichrt][tem.I_NATINNUP][pdm] = tem.getY( tem.I_INNUP );
 
-    output[tem.I_AGVNUP][pdm] = ZERO;
-    output[tem.I_NATVNUP][pdm] = tem.getY( tem.I_VNUP );
+    output[ichrt][tem.I_AGVNUP][pdm] = ZERO;
+    output[ichrt][tem.I_NATVNUP][pdm] = tem.getY( tem.I_VNUP );
 
-    output[tem.I_AGLTRN][pdm] = ZERO;
-    output[tem.I_NATLTRN][pdm] = tem.getY( tem.I_LTRLN ) + tem.getY( tem.I_LTRSN )
+    output[ichrt][tem.I_AGLTRN][pdm] = ZERO;
+    output[ichrt][tem.I_NATLTRN][pdm] = tem.getY( tem.I_LTRLN ) + tem.getY( tem.I_LTRSN )
 		+ tem.getY( tem.I_LTRHN ) + tem.getY( tem.I_LTRRN );
   }
   else
   {
-    output[tem.I_CROPC][pdm] = tem.getY( tem.I_LEAFC ) + tem.getY( tem.I_SAPWOODC )
+    output[ichrt][tem.I_CROPC][pdm] = tem.getY( tem.I_LEAFC ) + tem.getY( tem.I_SAPWOODC )
 		+ tem.getY( tem.I_HEARTWOODC ) + tem.getY( tem.I_ROOTC ) + tem.getY( tem.I_LABILEC );
-    output[tem.I_NATVEGC][pdm] = ZERO;
+    output[ichrt][tem.I_NATVEGC][pdm] = ZERO;
 
-    output[tem.I_CROPN][pdm] = tem.getY( tem.I_LEAFN ) + tem.getY( tem.I_SAPWOODN )
+    output[ichrt][tem.I_CROPN][pdm] = tem.getY( tem.I_LEAFN ) + tem.getY( tem.I_SAPWOODN )
 		+ tem.getY( tem.I_HEARTWOODN ) + tem.getY( tem.I_ROOTN ) + tem.getY( tem.I_LABILEN );
-    output[tem.I_NATVEGN][pdm] = ZERO;
+    output[ichrt][tem.I_NATVEGN][pdm] = ZERO;
 
-    output[tem.I_CSTRN][pdm] = tem.getY( tem.I_LEAFN ) + tem.getY( tem.I_SAPWOODN )
+    output[ichrt][tem.I_CSTRN][pdm] = tem.getY( tem.I_LEAFN ) + tem.getY( tem.I_SAPWOODN )
 		+ tem.getY( tem.I_HEARTWOODN ) + tem.getY( tem.I_ROOTN );
-    output[tem.I_NATSTRN][pdm] = ZERO;
+    output[ichrt][tem.I_NATSTRN][pdm] = ZERO;
 
-    output[tem.I_CSTON][pdm] = tem.getY( tem.I_LABILEN );
-    output[tem.I_NATSTON][pdm] = ZERO;
+    output[ichrt][tem.I_CSTON][pdm] = tem.getY( tem.I_LABILEN );
+    output[ichrt][tem.I_NATSTON][pdm] = ZERO;
 
-    output[tem.I_CROPLAI][pdm] = tem.getY( tem.I_LAI );
-    output[tem.I_NATLAI][pdm] = ZERO;
+    output[ichrt][tem.I_CROPLAI][pdm] = tem.getY( tem.I_LAI );
+    output[ichrt][tem.I_NATLAI][pdm] = ZERO;
 
-    output[tem.I_CROPFPC][pdm] = tem.getY( tem.I_FPC );
-    output[tem.I_NATFPC][pdm] = ZERO;
+    output[ichrt][tem.I_CROPFPC][pdm] = tem.getY( tem.I_FPC );
+    output[ichrt][tem.I_NATFPC][pdm] = ZERO;
 
-    output[tem.I_AGINGPP][pdm] = tem.getY( tem.I_INGPP );
-    output[tem.I_NATINGPP][pdm] = ZERO;
+    output[ichrt][tem.I_AGINGPP][pdm] = tem.getY( tem.I_INGPP );
+    output[ichrt][tem.I_NATINGPP][pdm] = ZERO;
 
-    output[tem.I_AGGPP][pdm] = tem.getY( tem.I_GPP );
-    output[tem.I_NATGPP][pdm] = ZERO;
+    output[ichrt][tem.I_AGGPP][pdm] = tem.getY( tem.I_GPP );
+    output[ichrt][tem.I_NATGPP][pdm] = ZERO;
 
-//    output[tem.I_AGINNPP][pdm] = tem.getY( tem.I_INNPP );
-    output[tem.I_AGINNPP][pdm] = tem.veg.getINNPP();
-    output[tem.I_NATINNPP][pdm] = ZERO;
+//    output[ichrt][tem.I_AGINNPP][pdm] = tem.getY( tem.I_INNPP );
+    output[ichrt][tem.I_AGINNPP][pdm] = tem.veg.getINNPP();
+    output[ichrt][tem.I_NATINNPP][pdm] = ZERO;
 
-//    output[tem.I_AGNPP][pdm] = tem.getY( tem.I_NPP );
-    output[tem.I_AGNPP][pdm] = tem.veg.getNPP();
-    output[tem.I_NATNPP][pdm] = ZERO;
+//    output[ichrt][tem.I_AGNPP][pdm] = tem.getY( tem.I_NPP );
+    output[ichrt][tem.I_AGNPP][pdm] = tem.veg.getNPP();
+    output[ichrt][tem.I_NATNPP][pdm] = ZERO;
 
-//    output[tem.I_AGGPR][pdm] = tem.getY( tem.I_GPR );
-    output[tem.I_AGGPR][pdm] = tem.veg.getGPR();
-    output[tem.I_NATGPR][pdm] = ZERO;
+//    output[ichrt][tem.I_AGGPR][pdm] = tem.getY( tem.I_GPR );
+    output[ichrt][tem.I_AGGPR][pdm] = tem.veg.getGPR();
+    output[ichrt][tem.I_NATGPR][pdm] = ZERO;
 
-    output[tem.I_AGRVMNT][pdm] = tem.getY( tem.I_RVMNT );
-    output[tem.I_NATRVMNT][pdm] = ZERO;
+    output[ichrt][tem.I_AGRVMNT][pdm] = tem.getY( tem.I_RVMNT );
+    output[ichrt][tem.I_NATRVMNT][pdm] = ZERO;
 
-    output[tem.I_AGRVGRW][pdm] = tem.getY( tem.I_RVGRW );
-    output[tem.I_NATRVGRW][pdm] = ZERO;
+    output[ichrt][tem.I_AGRVGRW][pdm] = tem.getY( tem.I_RVGRW );
+    output[ichrt][tem.I_NATRVGRW][pdm] = ZERO;
 
-    output[tem.I_AGLTRC][pdm] = tem.getY( tem.I_LTRLC ) + tem.getY( tem.I_LTRSC )
+    output[ichrt][tem.I_AGLTRC][pdm] = tem.getY( tem.I_LTRLC ) + tem.getY( tem.I_LTRSC )
 		+ tem.getY( tem.I_LTRHC ) + tem.getY( tem.I_LTRRC );
-    output[tem.I_NATLTRC][pdm] = ZERO;
+    output[ichrt][tem.I_NATLTRC][pdm] = ZERO;
 
-    output[tem.I_AGINNUP][pdm] = tem.getY( tem.I_INNUP );
-    output[tem.I_NATINNUP][pdm] = ZERO;
+    output[ichrt][tem.I_AGINNUP][pdm] = tem.getY( tem.I_INNUP );
+    output[ichrt][tem.I_NATINNUP][pdm] = ZERO;
 
-    output[tem.I_AGVNUP][pdm] = tem.getY( tem.I_VNUP );
-    output[tem.I_NATVNUP][pdm] = ZERO;
+    output[ichrt][tem.I_AGVNUP][pdm] = tem.getY( tem.I_VNUP );
+    output[ichrt][tem.I_NATVNUP][pdm] = ZERO;
 
 
-    output[tem.I_AGLTRN][pdm] = tem.getY( tem.I_LTRLN ) + tem.getY( tem.I_LTRSN )
+    output[ichrt][tem.I_AGLTRN][pdm] = tem.getY( tem.I_LTRLN ) + tem.getY( tem.I_LTRSN )
 		+ tem.getY( tem.I_LTRHN ) + tem.getY( tem.I_LTRRN );
-    output[tem.I_NATLTRN][pdm] = ZERO;
+    output[ichrt][tem.I_NATLTRN][pdm] = ZERO;
   }
 
 };
@@ -1430,7 +1393,7 @@ void Telm45::outputTEMmonth( const int& pdm )
 /* *************************************************************
 ************************************************************** */
 
-void Telm45::readCohortState( ifstream& ifstate,
+void Telm45::readCohortState( tem::state::In& ifstate,
                                   const int& pichrt )
 {
   int i;
@@ -1646,7 +1609,11 @@ void Telm45::readCohortState( ifstream& ifstate,
   ifstate >> cohort[pichrt].yrrmsapwood;
   ifstate >> cohort[pichrt].yrrmroot;
 
-  ifstate.seekg( 0, ios::cur );
+  ifstate >> cohort[pichrt].dgppdrootc;
+  ifstate >> cohort[pichrt].soninput;
+  ifstate >> cohort[pichrt].toptmic;
+  ifstate >> cohort[pichrt].yrallocseedc;
+  ifstate >> cohort[pichrt].yrpseed;
 
 };
 
@@ -1862,6 +1829,7 @@ void Telm45::saveTEMCohortState( const int& pichrt )
   cohort[pichrt].yrproot = tem.veg.yrproot;
 //  BSF added yrpseed
   cohort[pichrt].yrpseed = tem.veg.yrpseed;
+
   
   cohort[pichrt].yralloclc = tem.veg.yralloclc;
   cohort[pichrt].yrallocsc = tem.veg.yrallocsc;
@@ -1892,6 +1860,13 @@ void Telm45::setCohortTEMState( const ElmntCohort45& firstchrt,
     targetchrt.y[i] = firstchrt.y[i];
     targetchrt.prevy[i] = firstchrt.prevy[i];
   }
+
+  // members that the model carries from year to year and that initializeCohortTEMState sets; a cohort that is new
+  // in a transient year would otherwise keep what the cohort in that slot held in the previous cell
+  targetchrt.dgppdrootc = firstchrt.dgppdrootc;
+  targetchrt.soninput = firstchrt.soninput;
+  targetchrt.toptmic = firstchrt.toptmic;
+  targetchrt.yrallocseedc = firstchrt.yrallocseedc;
 
   targetchrt.aggrowdd = firstchrt.aggrowdd;
 
@@ -2046,6 +2021,7 @@ void Telm45::setCohortTEMState( const ElmntCohort45& firstchrt,
   targetchrt.yrproot = firstchrt.yrproot;
 //   BSF added yrpseed
   targetchrt.yrpseed = firstchrt.yrpseed;
+
   
   targetchrt.yralloclc = firstchrt.yralloclc;
   targetchrt.yrallocsc = firstchrt.yrallocsc;
@@ -2065,10 +2041,10 @@ void Telm45::setCohortTEMState( const ElmntCohort45& firstchrt,
 /* **************************************************************
 ************************************************************** */
 
-int Telm45::setGIStopography( ofstream& rflog1,
+int Telm45::setGIStopography( std::ostream& rflog1,
                                   int& ftlerr,
-                                  FILE* fstxt,
-                                  FILE* felev )
+                                  tem::nc::Stream* iftexture,
+                                  tem::nc::Stream* ifelev )
 {
 
   int gisend;
@@ -2076,7 +2052,7 @@ int Telm45::setGIStopography( ofstream& rflog1,
   Soildat45 fao;
   Elevdat45 elv;
 
-  gisend = fao.getdel( fstxt );
+  gisend = fao.read( iftexture );
 
   if( -1 == gisend )
   {
@@ -2087,17 +2063,17 @@ int Telm45::setGIStopography( ofstream& rflog1,
 
   ftlerr = coregerr( rflog1,
                      "Climate",
-                     col,
-                     row,
+                     lon,
+                     lat,
                      "TEXTURE",
-                     fao.col,
-                     fao.row );
+                     fao.lon,
+                     fao.lat );
 
   tem.soil.setPCTSAND( fao.pctsand );
   tem.soil.setPCTSILT( fao.pctsilt );
   tem.soil.setPCTCLAY( fao.pctclay );
 
-  gisend = elv.getdel( felev );
+  gisend = elv.read( ifelev );
 
   if( gisend == -1 )
   {
@@ -2108,11 +2084,11 @@ int Telm45::setGIStopography( ofstream& rflog1,
 
   ftlerr = coregerr( rflog1,
                      "Climate",
-                     col,
-                     row,
+                     lon,
+                     lat,
                      "ELEV",
-                     elv.col,
-                     elv.row );
+                     elv.lon,
+                     elv.lat );
 
   tem.elev = elv.elev;
 
@@ -2127,11 +2103,10 @@ int Telm45::setGIStopography( ofstream& rflog1,
 /* *************************************************************
 ************************************************************* */
 
-void Telm45::setTEMequilState( ofstream& rflog1,
+void Telm45::setTEMequilState( std::ostream& rflog1,
                                    const int& equil,
                                    const int& totsptime,
                                    const int& pichrt,
-                                   ofstream fout[NUMTEM],
                                    const vector<string>& predname,
                                    const int& spinoutfg
                               )
@@ -2154,7 +2129,6 @@ void Telm45::setTEMequilState( ofstream& rflog1,
 
   getTEMCohortState( pichrt );
 
-cout << "veg.cmnt = " << tem.veg.cmnt << endl;
   cohort[pichrt].qc = ACCEPT;
   cohort[pichrt].tqc = ACCEPT;
   
@@ -2230,7 +2204,7 @@ cout << "veg.cmnt = " << tem.veg.cmnt << endl;
 
     // determine avg. tair of initial year
       
-    avgtair += tem.atms.getTAIRD()/12.0;
+    avgtair += tem.atms.getTAIRD()/(double)CYCLE;
 
     if( dm == 0 ) { tem.veg.setTOPT( tem.veg.getTOPTMIN( tem.veg.cmnt ) ); }
     if( tem.atms.getTAIRD() > tem.veg.getTOPT() ) 
@@ -2317,7 +2291,7 @@ else
     // Initialize tem.atms.prevco2
     
     tem.atms.setPREVTAIR( climate[clm.I_TAIR][CYCLE-1][dyr] );
-    tem.atms.setPREV2TAIR( climate[clm.I_TAIR][CYCLE-2][dyr] );
+    tem.atms.setPREV2TAIR( climate[clm.I_TAIR][(CYCLE-2+CYCLE)%CYCLE][dyr] );
     tem.soil.setPREVSPACK( ZERO );
     tem.atms.setPREVCO2( climate[clm.I_CO2][CYCLE-1][dyr] );  
     
@@ -2347,7 +2321,7 @@ else
                          0.0);
      }
     
-      avgphi += tem.veg.getPHI()/12.0;
+      avgphi += tem.veg.getPHI()/(double)CYCLE;
     }
     
     tem.veg.setRPHI( avgphi );
@@ -2359,7 +2333,6 @@ else
 //   Do Not Allow Management during equilibration
 //
 //    tem.ag.state = 0;
-cout << "agstate = " << tem.ag.state << endl;
     tem.ag.prvstate = 0;
 
     tem.ag.tillflag = 0;
@@ -2395,7 +2368,7 @@ cout << "agstate = " << tem.ag.state << endl;
       tem.initializeState();
       
 
-      tem.nattempt = equilibrateTEM( tem.tol, pichrt, fout, predname, spinoutfg, year, rflog1 );
+      tem.nattempt = equilibrateTEM( tem.tol, pichrt, predname, spinoutfg, year, rflog1 );
 
       if( tem.nattempt < tem.maxnrun
           && 0 == tem.initFlag )
@@ -2403,7 +2376,11 @@ cout << "agstate = " << tem.ag.state << endl;
       	tem.tol /= 10.0;
       }
     }
-rflog1 << "final equilibration year = " << year << " " << tem.veg.cmnt << endl;
+{
+      char w[160];
+      std::snprintf( w, sizeof w, "lon %8.2f  lat %7.2f  cohort %d  community %2d  equilibrium after %d years", static_cast<double>( lon ), static_cast<double>( lat ), pichrt, tem.veg.cmnt, year );
+      tem::log::note( w );
+    }
 
     // Save quality control information about the simulation
     //   conditions when the equilibrium portion ended
@@ -2428,7 +2405,7 @@ rflog1 << "final equilibration year = " << year << " " << tem.veg.cmnt << endl;
       cohort[pichrt].tqc = transqc( tem.maxyears,
 	                            tem.totyr,
 //                                    tem.veg.getVEGC() );
-	                            output[tem.I_LABILEC] );
+	                            &output[pichrt][tem.I_LABILEC][0] );
     }
     else { ttotyr[dyr] = tem.totyr;
 //   cout << "ttotyr2 = " << dyr << " " << ttotyr[dyr] << endl;       
@@ -2494,7 +2471,7 @@ void Telm45::setTEMmiss( const int& pdyr,
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        output[i][dm] = ZERO;
+        output[pichrt][i][dm] = ZERO;
       }
     }
   }
@@ -2518,7 +2495,7 @@ void Telm45::setTEMmiss( const int& pdyr,
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        output[i][dm] = MISSING;
+        output[pichrt][i][dm] = MISSING;
       }
     }
   }
@@ -2593,8 +2570,7 @@ int Telm45::temgisqc( const float& subarea,
 /* *************************************************************
 ************************************************************** */
 
-void Telm45::temwritepred( ofstream fout[NUMTEM],
-                               const vector<string>& predname,
+void Telm45::temwritepred( const vector<string>& predname,
                                const int& pdyr,
                                const int& pichrt,
                                const int& ntempred,
@@ -2609,8 +2585,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
 
   int i;
   int dm;
-  Temdat45 tempred;
-
+  std::vector<double> predicted( CYCLE, 0.0 );
 
   for( i = 0; i < ntempred; ++i )
   {
@@ -2621,7 +2596,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_LEAFC][dm];
+        predicted[dm] = output[pichrt][tem.I_LEAFC][dm];
       }
     }
 
@@ -2629,7 +2604,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_SAPWOODC][dm];
+        predicted[dm] = output[pichrt][tem.I_SAPWOODC][dm];
       }
     }
 
@@ -2637,7 +2612,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_HEARTWOODC][dm];
+        predicted[dm] = output[pichrt][tem.I_HEARTWOODC][dm];
       }
     }
 
@@ -2645,7 +2620,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_ROOTC][dm];
+        predicted[dm] = output[pichrt][tem.I_ROOTC][dm];
       }
     }
 
@@ -2653,7 +2628,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_SEEDC][dm];
+        predicted[dm] = output[pichrt][tem.I_SEEDC][dm];
       }
     }
 
@@ -2661,7 +2636,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_LABILEC][dm];
+        predicted[dm] = output[pichrt][tem.I_LABILEC][dm];
       }
     }
 
@@ -2669,7 +2644,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_SOLC][dm];
+        predicted[dm] = output[pichrt][tem.I_SOLC][dm];
       }
     }
 
@@ -2677,7 +2652,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_TOTEC][dm];
+        predicted[dm] = output[pichrt][tem.I_TOTEC][dm];
       }
     }
 
@@ -2685,7 +2660,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_TOTC][dm];
+        predicted[dm] = output[pichrt][tem.I_TOTC][dm];
       }
     }
 
@@ -2696,7 +2671,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_LEAFN][dm];
+        predicted[dm] = output[pichrt][tem.I_LEAFN][dm];
       }
     }
 
@@ -2704,8 +2679,8 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_SAPWOODN][dm];
-//        tempred.mon[dm] = output[tem.I_SAPWOODN][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_SAPWOODN][dm];
+//        predicted[dm] = output[pichrt][tem.I_SAPWOODN][dm] * GRAMS2MG;
 
       }
     }
@@ -2714,7 +2689,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_HEARTWOODN][dm];
+        predicted[dm] = output[pichrt][tem.I_HEARTWOODN][dm];
       }
     }
 
@@ -2722,7 +2697,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_ROOTN][dm];
+        predicted[dm] = output[pichrt][tem.I_ROOTN][dm];
       }
     }
 
@@ -2730,7 +2705,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_SEEDN][dm];
+        predicted[dm] = output[pichrt][tem.I_SEEDN][dm];
       }
     }
 
@@ -2738,7 +2713,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_LABILEN][dm];
+        predicted[dm] = output[pichrt][tem.I_LABILEN][dm];
       }
     }
 
@@ -2746,7 +2721,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_SOLN][dm];
+        predicted[dm] = output[pichrt][tem.I_SOLN][dm];
       }
     }
 
@@ -2754,7 +2729,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_AVLN][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_AVLN][dm] * GRAMS2MG;
       }
     }
 
@@ -2762,7 +2737,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_VEGN][dm];
+        predicted[dm] = output[pichrt][tem.I_VEGN][dm];
       }
     }
 
@@ -2773,7 +2748,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_AVLW][dm];
+        predicted[dm] = output[pichrt][tem.I_AVLW][dm];
       }
     }
 
@@ -2781,7 +2756,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_SM][dm];
+        predicted[dm] = output[pichrt][tem.I_SM][dm];
       }
     }
 
@@ -2789,7 +2764,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_VSM][dm] * PROP2PCT;
+        predicted[dm] = output[pichrt][tem.I_VSM][dm] * PROP2PCT;
       }
     }
 
@@ -2797,7 +2772,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_PCTP][dm];
+        predicted[dm] = output[pichrt][tem.I_PCTP][dm];
       }
     }
 
@@ -2805,7 +2780,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_SNWPCK][dm];
+        predicted[dm] = output[pichrt][tem.I_SNWPCK][dm];
       }
     }
 
@@ -2813,7 +2788,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_RGRW][dm];
+        predicted[dm] = output[pichrt][tem.I_RGRW][dm];
       }
     }
 
@@ -2821,7 +2796,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_SGRW][dm];
+        predicted[dm] = output[pichrt][tem.I_SGRW][dm];
       }
     }
 
@@ -2833,7 +2808,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_LAI][dm];
+        predicted[dm] = output[pichrt][tem.I_LAI][dm];
       }
     }
 
@@ -2841,7 +2816,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_FPC][dm] * PROP2PCT;
+        predicted[dm] = output[pichrt][tem.I_FPC][dm] * PROP2PCT;
       }
     }
 
@@ -2853,8 +2828,8 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_INGPP][dm];
-//        cout << "INGPP in telm = " << dm << " " << tempred.mon[dm] << endl;
+        predicted[dm] = output[pichrt][tem.I_INGPP][dm];
+//        cout << "INGPP in telm = " << dm << " " << predicted[dm] << endl;
       }
     }
 
@@ -2862,7 +2837,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_GPP][dm];
+        predicted[dm] = output[pichrt][tem.I_GPP][dm];
       }
     }
 
@@ -2872,7 +2847,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_FOZONE][dm] * PROP2PCT;
+        predicted[dm] = output[pichrt][tem.I_FOZONE][dm] * PROP2PCT;
 
       }
     }
@@ -2883,7 +2858,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_FRDL][dm] * PROP2PCT;
+        predicted[dm] = output[pichrt][tem.I_FRDL][dm] * PROP2PCT;
 
       }
     }
@@ -2894,7 +2869,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_FCO2][dm] * PROP2PCT;
+        predicted[dm] = output[pichrt][tem.I_FCO2][dm] * PROP2PCT;
 
       }
     }
@@ -2905,7 +2880,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_TEMP][dm] * PROP2PCT;
+        predicted[dm] = output[pichrt][tem.I_TEMP][dm] * PROP2PCT;
 
       }
     }
@@ -2916,7 +2891,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_FH2O][dm] * PROP2PCT;
+        predicted[dm] = output[pichrt][tem.I_FH2O][dm] * PROP2PCT;
 
       }
     }
@@ -2927,7 +2902,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_FO3][dm] * PROP2PCT;
+        predicted[dm] = output[pichrt][tem.I_FO3][dm] * PROP2PCT;
 
       }
     }
@@ -2936,7 +2911,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_INNPP][dm];
+        predicted[dm] = output[pichrt][tem.I_INNPP][dm];
       }
     }
 
@@ -2944,7 +2919,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_NPP][dm];
+        predicted[dm] = output[pichrt][tem.I_NPP][dm];
       }
     }
 
@@ -2952,7 +2927,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_GPR][dm];
+        predicted[dm] = output[pichrt][tem.I_GPR][dm];
       }
     }
 
@@ -2960,7 +2935,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_ALLOCLC][dm];
+        predicted[dm] = output[pichrt][tem.I_ALLOCLC][dm];
       }
     }
 
@@ -2968,7 +2943,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_ALLOCSC][dm];
+        predicted[dm] = output[pichrt][tem.I_ALLOCSC][dm];
       }
     }
 
@@ -2976,7 +2951,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_ALLOCHC][dm];
+        predicted[dm] = output[pichrt][tem.I_ALLOCHC][dm];
       }
     }
 
@@ -2984,7 +2959,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_ALLOCRC][dm];
+        predicted[dm] = output[pichrt][tem.I_ALLOCRC][dm];
       }
     }
 
@@ -2992,7 +2967,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_ALLOCSEEDC][dm];
+        predicted[dm] = output[pichrt][tem.I_ALLOCSEEDC][dm];
       }
     }
 
@@ -3000,7 +2975,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_RVMNT][dm];
+        predicted[dm] = output[pichrt][tem.I_RVMNT][dm];
       }
     }
 
@@ -3008,7 +2983,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_RMLEAF][dm];
+        predicted[dm] = output[pichrt][tem.I_RMLEAF][dm];
       }
     }
 
@@ -3016,7 +2991,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_RMSAPWOOD][dm];
+        predicted[dm] = output[pichrt][tem.I_RMSAPWOOD][dm];
       }
     }
 
@@ -3024,7 +2999,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_RMROOT][dm];
+        predicted[dm] = output[pichrt][tem.I_RMROOT][dm];
       }
     }
 
@@ -3032,7 +3007,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_RMSEED][dm];
+        predicted[dm] = output[pichrt][tem.I_RMSEED][dm];
       }
     }
 
@@ -3040,7 +3015,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_RMLABILE][dm];
+        predicted[dm] = output[pichrt][tem.I_RMLABILE][dm];
       }
     }
 
@@ -3048,7 +3023,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_RVGRW][dm];
+        predicted[dm] = output[pichrt][tem.I_RVGRW][dm];
       }
     }
 
@@ -3056,7 +3031,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_LTRLC][dm];
+        predicted[dm] = output[pichrt][tem.I_LTRLC][dm];
       }
     }
 
@@ -3064,7 +3039,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_LTRSC][dm];
+        predicted[dm] = output[pichrt][tem.I_LTRSC][dm];
       }
     }
 
@@ -3072,7 +3047,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_LTRHC][dm];
+        predicted[dm] = output[pichrt][tem.I_LTRHC][dm];
       }
     }
 
@@ -3080,7 +3055,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_LTRRC][dm];
+        predicted[dm] = output[pichrt][tem.I_LTRRC][dm];
       }
     }
 
@@ -3088,7 +3063,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_LTRSEEDC][dm];
+        predicted[dm] = output[pichrt][tem.I_LTRSEEDC][dm];
       }
     }
 
@@ -3096,7 +3071,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_RH][dm];
+        predicted[dm] = output[pichrt][tem.I_RH][dm];
       }
     }
 
@@ -3104,7 +3079,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_DOC][dm];
+        predicted[dm] = output[pichrt][tem.I_DOC][dm];
       }
     }
 
@@ -3112,7 +3087,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_DON][dm];
+        predicted[dm] = output[pichrt][tem.I_DON][dm];
       }
     }
 
@@ -3121,7 +3096,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_NEP][dm];
+        predicted[dm] = output[pichrt][tem.I_NEP][dm];
       }
     }
 
@@ -3129,7 +3104,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_NCE][dm];
+        predicted[dm] = output[pichrt][tem.I_NCE][dm];
       }
     }
 
@@ -3137,7 +3112,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_NBP][dm];
+        predicted[dm] = output[pichrt][tem.I_NBP][dm];
       }
     }
 
@@ -3148,7 +3123,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_ALLOCLN][dm];
+        predicted[dm] = output[pichrt][tem.I_ALLOCLN][dm];
       }
     }
 
@@ -3156,7 +3131,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_ALLOCSN][dm];
+        predicted[dm] = output[pichrt][tem.I_ALLOCSN][dm];
       }
     }
 
@@ -3164,7 +3139,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_ALLOCHN][dm];
+        predicted[dm] = output[pichrt][tem.I_ALLOCHN][dm];
       }
     }
 
@@ -3172,7 +3147,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_ALLOCRN][dm];
+        predicted[dm] = output[pichrt][tem.I_ALLOCRN][dm];
       }
     }
 
@@ -3180,7 +3155,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_ALLOCSEEDN][dm];
+        predicted[dm] = output[pichrt][tem.I_ALLOCSEEDN][dm];
       }
     }
 
@@ -3188,7 +3163,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_NINP][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_NINP][dm] * GRAMS2MG;
       }
     }
 
@@ -3196,7 +3171,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_AGFRTN][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_AGFRTN][dm] * GRAMS2MG;
       }
     }
 
@@ -3204,7 +3179,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_INNUP][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_INNUP][dm] * GRAMS2MG;
       }
     }
 
@@ -3212,7 +3187,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_VNUP][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_VNUP][dm] * GRAMS2MG;
       }
     }
 
@@ -3220,7 +3195,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_LTRLN][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_LTRLN][dm] * GRAMS2MG;
       }
     }
 
@@ -3228,7 +3203,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_LTRSN][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_LTRSN][dm] * GRAMS2MG;
       }
     }
 
@@ -3236,7 +3211,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_LTRHN][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_LTRHN][dm] * GRAMS2MG;
       }
     }
 
@@ -3244,7 +3219,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_LTRRN][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_LTRRN][dm] * GRAMS2MG;
       }
     }
 
@@ -3252,7 +3227,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_LTRSEEDN][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_LTRSEEDN][dm] * GRAMS2MG;
       }
     }
 
@@ -3260,7 +3235,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_MNUP][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_MNUP][dm] * GRAMS2MG;
       }
     }
 
@@ -3268,7 +3243,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_NMIN][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_NMIN][dm] * GRAMS2MG;
       }
     }
 
@@ -3276,7 +3251,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_NRESORBL][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_NRESORBL][dm] * GRAMS2MG;
       }
     }
 
@@ -3284,7 +3259,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_NRESORBS][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_NRESORBS][dm] * GRAMS2MG;
       }
     }
 
@@ -3292,7 +3267,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_NRESORBR][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_NRESORBR][dm] * GRAMS2MG;
       }
     }
 
@@ -3300,7 +3275,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_NRESORBSEED][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_NRESORBSEED][dm] * GRAMS2MG;
       }
     }
 
@@ -3308,7 +3283,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_NLST][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_NLST][dm] * GRAMS2MG;
       }
     }
 
@@ -3316,7 +3291,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_LCHDON][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_LCHDON][dm] * GRAMS2MG;
       }
     }
 
@@ -3324,7 +3299,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_LCHDIN][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_LCHDIN][dm] * GRAMS2MG;
       }
     }
 
@@ -3332,7 +3307,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_LCHDOC][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_LCHDOC][dm] * GRAMS2MG;
       }
     }
 
@@ -3340,7 +3315,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_DONPROD][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_DONPROD][dm] * GRAMS2MG;
       }
     }
 
@@ -3348,7 +3323,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_DOCPROD][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_DOCPROD][dm] * GRAMS2MG;
       }
     }
 
@@ -3356,7 +3331,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_NFIXN][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_NFIXN][dm] * GRAMS2MG;
       }
     }
 
@@ -3364,7 +3339,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_NFIXS][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_NFIXS][dm] * GRAMS2MG;
       }
     }
 
@@ -3375,7 +3350,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_AGIRRIG][dm];
+        predicted[dm] = output[pichrt][tem.I_AGIRRIG][dm];
       }
     }
 
@@ -3383,7 +3358,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_INEET][dm];
+        predicted[dm] = output[pichrt][tem.I_INEET][dm];
       }
     }
 
@@ -3391,7 +3366,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_EET][dm];
+        predicted[dm] = output[pichrt][tem.I_EET][dm];
       }
     }
 
@@ -3399,7 +3374,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_RPERC][dm];
+        predicted[dm] = output[pichrt][tem.I_RPERC][dm];
       }
     }
 
@@ -3407,7 +3382,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_SPERC][dm];
+        predicted[dm] = output[pichrt][tem.I_SPERC][dm];
       }
     }
 
@@ -3415,8 +3390,8 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-//        tempred.mon[dm] = output[tem.I_RRUN][dm] - tem.rfrac[dm]*((tem.wevapd[dm]+tem.wevapn[dm])/2);
-        tempred.mon[dm] = output[tem.I_RRUN][dm];
+//        predicted[dm] = output[pichrt][tem.I_RRUN][dm] - tem.rfrac[dm]*((tem.wevapd[dm]+tem.wevapn[dm])/2);
+        predicted[dm] = output[pichrt][tem.I_RRUN][dm];
       }
     }
 
@@ -3425,8 +3400,8 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-//        tempred.mon[dm] = output[tem.I_SRUN][dm] - (1-tem.rfrac[dm])*((tem.wevapd[dm]+tem.wevapn[dm])/2);
-        tempred.mon[dm] = output[tem.I_SRUN][dm];
+//        predicted[dm] = output[pichrt][tem.I_SRUN][dm] - (1-tem.rfrac[dm])*((tem.wevapd[dm]+tem.wevapn[dm])/2);
+        predicted[dm] = output[pichrt][tem.I_SRUN][dm];
       }
     }
 
@@ -3434,7 +3409,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_GC][dm];
+        predicted[dm] = output[pichrt][tem.I_GC][dm];
       }
     }
 
@@ -3442,7 +3417,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_GS][dm];
+        predicted[dm] = output[pichrt][tem.I_GS][dm];
       }
     }
 
@@ -3450,7 +3425,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for ( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_PET][dm];
+        predicted[dm] = output[pichrt][tem.I_PET][dm];
       }
     }
 
@@ -3458,7 +3433,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_SNWINF][dm];
+        predicted[dm] = output[pichrt][tem.I_SNWINF][dm];
       }
     }
 
@@ -3466,9 +3441,9 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-//        tempred.mon[dm] = output[tem.I_WYLD][dm] - ((tem.wevapd[dm]+tem.wevapn[dm])/2);
-        tempred.mon[dm] = output[tem.I_WYLD][dm];
-//        cout << "wyld = " << dm << " " << output[tem.I_WYLD][dm] << " " << tem.wevapd[dm] << " " << tem.wevapn[dm] << endl;
+//        predicted[dm] = output[pichrt][tem.I_WYLD][dm] - ((tem.wevapd[dm]+tem.wevapn[dm])/2);
+        predicted[dm] = output[pichrt][tem.I_WYLD][dm];
+//        cout << "wyld = " << dm << " " << output[pichrt][tem.I_WYLD][dm] << " " << tem.wevapd[dm] << " " << tem.wevapn[dm] << endl;
       }
     }
 
@@ -3476,7 +3451,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_PECAN][dm];
+        predicted[dm] = output[pichrt][tem.I_PECAN][dm];
       }
     }
 
@@ -3484,7 +3459,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
    {
      for( dm = 0; dm < CYCLE; ++dm )
      {
-       tempred.mon[dm] = output[tem.I_PESOIL][dm];
+       predicted[dm] = output[pichrt][tem.I_PESOIL][dm];
      }
    }
 
@@ -3497,7 +3472,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_AGPRDC][dm];
+        predicted[dm] = output[pichrt][tem.I_AGPRDC][dm];
       }
     }
 
@@ -3505,7 +3480,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_CLIPPINGS][dm];
+        predicted[dm] = output[pichrt][tem.I_CLIPPINGS][dm];
       }
     }
 
@@ -3513,14 +3488,14 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_PROD10C][dm];      }
+        predicted[dm] = output[pichrt][tem.I_PROD10C][dm];      }
     }
 
     else if( predname.at( i ) == tem.predstr.at( tem.I_PROD100C ) )
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_PROD100C][dm];
+        predicted[dm] = output[pichrt][tem.I_PROD100C][dm];
       }
     }
 
@@ -3528,7 +3503,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_TOTPRDC][dm];
+        predicted[dm] = output[pichrt][tem.I_TOTPRDC][dm];
       }
     }
 
@@ -3536,7 +3511,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_RESIDC][dm];
+        predicted[dm] = output[pichrt][tem.I_RESIDC][dm];
       }
     }
 
@@ -3544,7 +3519,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_AGSTUBC][dm];
+        predicted[dm] = output[pichrt][tem.I_AGSTUBC][dm];
       }
     }
 
@@ -3555,7 +3530,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_AGPRDN][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_AGPRDN][dm] * GRAMS2MG;
       }
     }
 
@@ -3563,7 +3538,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_PROD10N][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_PROD10N][dm] * GRAMS2MG;
       }
     }
 
@@ -3571,7 +3546,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_PROD100N][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_PROD100N][dm] * GRAMS2MG;
       }
     }
 
@@ -3579,7 +3554,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_TOTPRDN][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_TOTPRDN][dm] * GRAMS2MG;
       }
     }
 
@@ -3587,7 +3562,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_RESIDN][dm];
+        predicted[dm] = output[pichrt][tem.I_RESIDN][dm];
       }
     }
 
@@ -3595,7 +3570,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_AGSTUBN][dm];
+        predicted[dm] = output[pichrt][tem.I_AGSTUBN][dm];
       }
     }
 
@@ -3607,7 +3582,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_CNVRTC][dm];
+        predicted[dm] = output[pichrt][tem.I_CNVRTC][dm];
       }
     }
 
@@ -3615,7 +3590,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_VCNVRTC][dm];
+        predicted[dm] = output[pichrt][tem.I_VCNVRTC][dm];
       }
     }
 
@@ -3623,7 +3598,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_SCNVRTC][dm];
+        predicted[dm] = output[pichrt][tem.I_SCNVRTC][dm];
       }
     }
 
@@ -3631,7 +3606,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_SLASHC][dm];
+        predicted[dm] = output[pichrt][tem.I_SLASHC][dm];
       }
     }
 
@@ -3639,7 +3614,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_STANDDEADC][dm];
+        predicted[dm] = output[pichrt][tem.I_STANDDEADC][dm];
       }
     }
 
@@ -3647,7 +3622,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_VOLAC][dm];
+        predicted[dm] = output[pichrt][tem.I_VOLAC][dm];
       }
     }
 
@@ -3656,7 +3631,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_CFLX][dm];
+        predicted[dm] = output[pichrt][tem.I_CFLX][dm];
       }
     }
 
@@ -3668,7 +3643,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_CNVRTN][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_CNVRTN][dm] * GRAMS2MG;
       }
     }
 
@@ -3676,7 +3651,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_VCNVRTN][dm];
+        predicted[dm] = output[pichrt][tem.I_VCNVRTN][dm];
       }
     }
 
@@ -3684,7 +3659,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_SCNVRTN][dm];
+        predicted[dm] = output[pichrt][tem.I_SCNVRTN][dm];
       }
     }
 
@@ -3692,7 +3667,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-      	 tempred.mon[dm] = output[tem.I_SLASHN][dm];
+        predicted[dm] = output[pichrt][tem.I_SLASHN][dm];
       }
     }
 
@@ -3700,7 +3675,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-         tempred.mon[dm] = output[tem.I_STANDDEADN][dm];
+         predicted[dm] = output[pichrt][tem.I_STANDDEADN][dm];
       }
     }
 
@@ -3708,15 +3683,40 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-         tempred.mon[dm] = output[tem.I_VOLAN][dm];
+         predicted[dm] = output[pichrt][tem.I_VOLAN][dm];
       }
     }
+
+    else if( predname.at( i ) == tem.predstr.at( tem.I_AREABURN ) )
+    {
+      for( dm = 0; dm < CYCLE; ++dm )
+      {
+         predicted[dm] = output[pichrt][tem.I_AREABURN][dm];
+      }
+    }
+
+    else if( predname.at( i ) == tem.predstr.at( tem.I_POTEVAP ) )
+    {
+      for( dm = 0; dm < CYCLE; ++dm )
+      {
+        predicted[dm] = output[pichrt][tem.I_POTEVAP][dm];
+      }
+    }
+
+    else if( predname.at( i ) == tem.predstr.at( tem.I_ACTEVAP ) )
+    {
+      for( dm = 0; dm < CYCLE; ++dm )
+      {
+        predicted[dm] = output[pichrt][tem.I_ACTEVAP][dm];
+      }
+    }
+
 
     else if( predname.at( i ) == tem.predstr.at( tem.I_NRETNT ) )
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_NRETNT][dm];
+        predicted[dm] = output[pichrt][tem.I_NRETNT][dm];
       }
     }
 
@@ -3724,7 +3724,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_NVRTNT][dm];
+        predicted[dm] = output[pichrt][tem.I_NVRTNT][dm];
       }
     }
 
@@ -3732,7 +3732,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_NSRTNT][dm];
+        predicted[dm] = output[pichrt][tem.I_NSRTNT][dm];
       }
     }
 
@@ -3743,7 +3743,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_AGFPRDC][dm];
+        predicted[dm] = output[pichrt][tem.I_AGFPRDC][dm];
       }
     }
 
@@ -3751,7 +3751,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_PRDF10C][dm];
+        predicted[dm] = output[pichrt][tem.I_PRDF10C][dm];
       }
     }
 
@@ -3759,7 +3759,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_PRDF100C][dm];
+        predicted[dm] = output[pichrt][tem.I_PRDF100C][dm];
       }
     }
 
@@ -3767,7 +3767,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_TOTFPRDC][dm];
+        predicted[dm] = output[pichrt][tem.I_TOTFPRDC][dm];
       }
     }
 
@@ -3775,7 +3775,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_FRESIDC][dm];
+        predicted[dm] = output[pichrt][tem.I_FRESIDC][dm];
       }
     }
 
@@ -3783,7 +3783,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_AGPRDFC][dm];
+        predicted[dm] = output[pichrt][tem.I_AGPRDFC][dm];
       }
     }
 
@@ -3791,7 +3791,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_PRD10FC][dm];
+        predicted[dm] = output[pichrt][tem.I_PRD10FC][dm];
       }
     }
 
@@ -3799,7 +3799,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_PRD100FC][dm];
+        predicted[dm] = output[pichrt][tem.I_PRD100FC][dm];
       }
     }
 
@@ -3807,7 +3807,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_TOTPRDFC][dm];
+        predicted[dm] = output[pichrt][tem.I_TOTPRDFC][dm];
       }
     }
 
@@ -3815,7 +3815,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_RESIDFC][dm];
+        predicted[dm] = output[pichrt][tem.I_RESIDFC][dm];
       }
     }
 
@@ -3826,7 +3826,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_AGFPRDN][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_AGFPRDN][dm] * GRAMS2MG;
       }
     }
 
@@ -3834,7 +3834,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_PRDF10N][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_PRDF10N][dm] * GRAMS2MG;
       }
     }
 
@@ -3842,7 +3842,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_PRDF100N][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_PRDF100N][dm] * GRAMS2MG;
       }
     }
 
@@ -3850,7 +3850,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_TOTFPRDN][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_TOTFPRDN][dm] * GRAMS2MG;
       }
     }
 
@@ -3858,7 +3858,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_FRESIDN][dm];
+        predicted[dm] = output[pichrt][tem.I_FRESIDN][dm];
       }
     }
 
@@ -3866,7 +3866,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_AGPRDFN][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_AGPRDFN][dm] * GRAMS2MG;
       }
     }
 
@@ -3874,7 +3874,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_PRD10FN][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_PRD10FN][dm] * GRAMS2MG;
       }
     }
 
@@ -3882,7 +3882,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_PRD100FN][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_PRD100FN][dm] * GRAMS2MG;
       }
     }
 
@@ -3890,7 +3890,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_TOTPRDFN][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_TOTPRDFN][dm] * GRAMS2MG;
       }
     }
 
@@ -3898,7 +3898,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_RESIDFN][dm];
+        predicted[dm] = output[pichrt][tem.I_RESIDFN][dm];
       }
     }
 
@@ -3909,7 +3909,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_CROPC][dm];
+        predicted[dm] = output[pichrt][tem.I_CROPC][dm];
       }
     }
 
@@ -3917,7 +3917,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_NATVEGC][dm];
+        predicted[dm] = output[pichrt][tem.I_NATVEGC][dm];
       }
     }
 
@@ -3929,7 +3929,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_CROPN][dm];
+        predicted[dm] = output[pichrt][tem.I_CROPN][dm];
       }
     }
 
@@ -3937,7 +3937,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_NATVEGN][dm];
+        predicted[dm] = output[pichrt][tem.I_NATVEGN][dm];
       }
     }
 
@@ -3945,7 +3945,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_CSTRN][dm];
+        predicted[dm] = output[pichrt][tem.I_CSTRN][dm];
       }
     }
 
@@ -3953,7 +3953,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_NATSTRN][dm];
+        predicted[dm] = output[pichrt][tem.I_NATSTRN][dm];
       }
     }
 
@@ -3961,7 +3961,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_CSTON][dm];
+        predicted[dm] = output[pichrt][tem.I_CSTON][dm];
       }
     }
 
@@ -3969,7 +3969,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_NATSTON][dm];
+        predicted[dm] = output[pichrt][tem.I_NATSTON][dm];
       }
     }
 
@@ -3979,7 +3979,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_CROPLAI][dm];
+        predicted[dm] = output[pichrt][tem.I_CROPLAI][dm];
       }
     }
 
@@ -3987,7 +3987,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_NATLAI][dm];
+        predicted[dm] = output[pichrt][tem.I_NATLAI][dm];
       }
     }
 
@@ -3995,7 +3995,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_CROPFPC][dm] * PROP2PCT;
+        predicted[dm] = output[pichrt][tem.I_CROPFPC][dm] * PROP2PCT;
       }
     }
 
@@ -4003,7 +4003,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_NATFPC][dm] * PROP2PCT;
+        predicted[dm] = output[pichrt][tem.I_NATFPC][dm] * PROP2PCT;
       }
     }
 
@@ -4013,7 +4013,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_AGINGPP][dm];
+        predicted[dm] = output[pichrt][tem.I_AGINGPP][dm];
       }
     }
 
@@ -4021,7 +4021,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_NATINGPP][dm];
+        predicted[dm] = output[pichrt][tem.I_NATINGPP][dm];
       }
     }
 
@@ -4029,7 +4029,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_AGGPP][dm];
+        predicted[dm] = output[pichrt][tem.I_AGGPP][dm];
       }
     }
 
@@ -4037,7 +4037,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_NATGPP][dm];
+        predicted[dm] = output[pichrt][tem.I_NATGPP][dm];
       }
     }
 
@@ -4045,7 +4045,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_AGINNPP][dm];
+        predicted[dm] = output[pichrt][tem.I_AGINNPP][dm];
       }
     }
 
@@ -4053,7 +4053,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_NATINNPP][dm];
+        predicted[dm] = output[pichrt][tem.I_NATINNPP][dm];
       }
     }
 
@@ -4061,7 +4061,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_AGNPP][dm];
+        predicted[dm] = output[pichrt][tem.I_AGNPP][dm];
       }
     }
 
@@ -4069,7 +4069,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_NATNPP][dm];
+        predicted[dm] = output[pichrt][tem.I_NATNPP][dm];
       }
     }
 
@@ -4077,7 +4077,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_AGGPR][dm];
+        predicted[dm] = output[pichrt][tem.I_AGGPR][dm];
       }
     }
 
@@ -4085,7 +4085,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_NATGPR][dm];
+        predicted[dm] = output[pichrt][tem.I_NATGPR][dm];
       }
     }
 
@@ -4093,7 +4093,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_AGRVMNT][dm];
+        predicted[dm] = output[pichrt][tem.I_AGRVMNT][dm];
       }
     }
 
@@ -4101,7 +4101,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_NATRVMNT][dm];
+        predicted[dm] = output[pichrt][tem.I_NATRVMNT][dm];
       }
     }
 
@@ -4109,7 +4109,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_AGRVGRW][dm];
+        predicted[dm] = output[pichrt][tem.I_AGRVGRW][dm];
       }
     }
 
@@ -4117,7 +4117,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_NATRVGRW][dm];
+        predicted[dm] = output[pichrt][tem.I_NATRVGRW][dm];
       }
     }
 
@@ -4125,7 +4125,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_AGLTRC][dm];
+        predicted[dm] = output[pichrt][tem.I_AGLTRC][dm];
       }
     }
 
@@ -4133,7 +4133,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_NATLTRC][dm];
+        predicted[dm] = output[pichrt][tem.I_NATLTRC][dm];
       }
     }
 
@@ -4144,7 +4144,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_AGINNUP][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_AGINNUP][dm] * GRAMS2MG;
       }
     }
 
@@ -4152,7 +4152,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_NATINNUP][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_NATINNUP][dm] * GRAMS2MG;
       }
     }
 
@@ -4160,7 +4160,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_AGVNUP][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_AGVNUP][dm] * GRAMS2MG;
       }
     }
 
@@ -4168,7 +4168,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_NATVNUP][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_NATVNUP][dm] * GRAMS2MG;
       }
     }
 
@@ -4176,7 +4176,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_AGLTRN][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_AGLTRN][dm] * GRAMS2MG;
       }
     }
 
@@ -4184,7 +4184,7 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = output[tem.I_NATLTRN][dm] * GRAMS2MG;
+        predicted[dm] = output[pichrt][tem.I_NATLTRN][dm] * GRAMS2MG;
       }
     }
 
@@ -4192,106 +4192,37 @@ void Telm45::temwritepred( ofstream fout[NUMTEM],
     {
       for( dm = 0; dm < CYCLE; ++dm )
       {
-        tempred.mon[dm] = MISSING;
+        predicted[dm] = MISSING;
       }
     }
 
 
-    // Write output data to files
-
-//   if(ttotyr[pdyr] > 0) 
-//      cout << "output = " << ttotyr[pdyr] << " " << pdyr << endl;
-   if(equilfg == 1) 
-   {
-    if( predname.at( i ) == tem.predstr.at( tem.I_VSM )
-        || predname.at( i ) == tem.predstr.at( tem.I_PCTP ) )
+    if( tem::nc::outputEnabled() && ( 0 == equilfg || 1 == equilfg ) )
     {
-      tempred.poutdel( fout[i],
-                       col,
-                       row,
-                       predname.at( i ),
-                       (pichrt+1),
-                       cohort[pichrt].standage,
-                       tem.veg.getPOTVEG(),
-                       tem.veg.getCURRENTVEG(),
-                       tem.veg.getSUBTYPE(),
-                       tem.veg.cmnt,
-                       (PROP2PCT * tem.soil.getPSIPLUSC()),
-                       tem.qualcon[pdyr],
-                       carea,
-                       cohort[pichrt].chrtarea,
-                       ttotyr[pdyr],
-                       tempred.mon,
-                       region );
-    }
-    else
-    {
-      tempred.outdel( fout[i],
-                      col,
-                      row,
-                      predname.at( i ),
-                      (pichrt+1),
-                      cohort[pichrt].standage,
-                      tem.veg.getPOTVEG(),
-                      tem.veg.getCURRENTVEG(),
-                      tem.veg.getSUBTYPE(),
-                      tem.veg.cmnt,
-                      (PROP2PCT * tem.soil.getPSIPLUSC()),
-                      tem.qualcon[pdyr],
-                      carea,
-                      cohort[pichrt].chrtarea,
-                      ttotyr[pdyr],
-                      tempred.mon,
-                      region );
+      if( 0 == i )
+      {
+        const int yr = ( 1 == equilfg ) ? ttotyr[pdyr] : pdyr;
+        std::vector<double> cv( CYCLE );
+        for( dm = 0; dm < CYCLE; ++dm ) cv[dm] = cohort[pichrt].currentveg;
+        tem::nc::outputPut( "currentveg", lon, lat, pichrt + 1, yr, &cv[0] );
+        for( dm = 0; dm < CYCLE; ++dm ) cv[dm] = cohort[pichrt].potveg;
+        tem::nc::outputPut( "potveg", lon, lat, pichrt + 1, yr, &cv[0] );
+        for( dm = 0; dm < CYCLE; ++dm ) cv[dm] = cohort[pichrt].agstate;
+        tem::nc::outputPut( "agstate", lon, lat, pichrt + 1, yr, &cv[0] );
+        for( dm = 0; dm < CYCLE; ++dm ) cv[dm] = cohort[pichrt].standage;
+        tem::nc::outputPut( "standage", lon, lat, pichrt + 1, yr, &cv[0] );
+        for( dm = 0; dm < CYCLE; ++dm ) cv[dm] = cohort[pichrt].subtype;
+        tem::nc::outputPut( "subtype", lon, lat, pichrt + 1, yr, &cv[0] );
+        for( dm = 0; dm < CYCLE; ++dm ) cv[dm] = cohort[pichrt].cmnt;
+        tem::nc::outputPut( "cmnt", lon, lat, pichrt + 1, yr, &cv[0] );
+        for( dm = 0; dm < CYCLE; ++dm ) cv[dm] = carea;
+        tem::nc::outputPut( "carea", lon, lat, pichrt + 1, yr, &cv[0] );
+        for( dm = 0; dm < CYCLE; ++dm ) cv[dm] = cohort[pichrt].chrtarea;
+        tem::nc::outputPut( "subarea", lon, lat, pichrt + 1, yr, &cv[0] );
+      }
+      tem::nc::outputPut( predname.at( i ), lon, lat, (pichrt+1), ( 1 == equilfg ) ? ttotyr[pdyr] : pdyr, &predicted[0] );
     }
   }
-
-if(equilfg == 0)
-{
-    if( predname.at( i ) == tem.predstr.at( tem.I_VSM )
-        || predname.at( i ) == tem.predstr.at( tem.I_PCTP ) )
-    {
-      tempred.poutdel( fout[i],
-                       col,
-                       row,
-                       predname.at( i ),
-                       (pichrt+1),
-                       cohort[pichrt].standage,
-                       tem.veg.getPOTVEG(),
-                       tem.veg.getCURRENTVEG(),
-                       tem.veg.getSUBTYPE(),
-                       tem.veg.cmnt,
-                       (PROP2PCT * tem.soil.getPSIPLUSC()),
-                       tem.qualcon[pdyr],
-                       carea,
-                       cohort[pichrt].chrtarea,
-                       pdyr,
-                       tempred.mon,
-                       region );
-    }
-    else
-    {
-      tempred.outdel( fout[i],
-                      col,
-                      row,
-                      predname.at( i ),
-                      (pichrt+1),
-                      cohort[pichrt].standage,
-                      tem.veg.getPOTVEG(),
-                      tem.veg.getCURRENTVEG(),
-                      tem.veg.getSUBTYPE(),
-                      tem.veg.cmnt,
-                      (PROP2PCT * tem.soil.getPSIPLUSC()),
-                      tem.qualcon[pdyr],
-                      carea,
-                      cohort[pichrt].chrtarea,
-                      pdyr,
-                      tempred.mon,
-                      region );
-    }
-  }
-}
-
 };
 
 /* *************************************************************
@@ -4303,7 +4234,7 @@ if(equilfg == 0)
 
 int Telm45::transqc( int& maxyears,
                          int& totyr,
-                         double plantc[CYCLE] )
+                         double* plantc )
 {
 
   int dm;
@@ -4331,7 +4262,7 @@ void Telm45::updateTEMmonth( const int& equil,
                                  const int& pdyr,
                                  const int& pdm,
                                  const int& pichrt,
-                                 ofstream& rflog1 )
+                                 std::ostream& rflog1 )
 {
   // Pass cohort characteristics information to TEM
 
@@ -4406,14 +4337,14 @@ void Telm45::updateTEMmonth( const int& equil,
     // Save TEM output to telmnt[0].output
 
 //   cout << "GPP out = " << tem.veg.getGPP() << endl;
-    outputTEMmonth( pdm );
+    outputTEMmonth( pdm, pichrt );
 
     ttotyr[pdyr] = tem.totyr;
 //    cout << "totyr1 = " << ttotyr[pdyr] << " " << pdm << " " << pdyr << endl;
   } // End of qc == ACCEPT and tqc = ACCEPT
   else
   {
-    if( (CYCLE-1) == pdm )
+    if( (CYCLE-1) == pdm || Ttem45::isCutStep( pdm ) )
     {
       // Set missing values to telmnt[0].output
 
@@ -4438,221 +4369,227 @@ void Telm45::updateTEMmonth( const int& equil,
 /* *************************************************************
 ************************************************************** */
 
-void Telm45::writeCohortState( ofstream& ofstate,
+void Telm45::writeCohortState( tem::state::Out& ofstate,
                                    const int& pichrt )
 {
   int i;
   int dm;
 
-  ofstate << col << " ";
-  ofstate << row << " ";
-  ofstate << (pichrt+1) << " ";
+  ofstate << lon;
+  ofstate << lat;
+  ofstate << (pichrt+1);
 
-  ofstate << cohort[pichrt].srcCohort << " ";
-  ofstate << cohort[pichrt].standage << " ";
-  ofstate << cohort[pichrt].chrtarea << " ";
-  ofstate << cohort[pichrt].potveg << " ";
-  ofstate << cohort[pichrt].currentveg << " ";
-  ofstate << cohort[pichrt].subtype << " ";
-  ofstate << cohort[pichrt].cmnt << " ";
+  ofstate << cohort[pichrt].srcCohort;
+  ofstate << cohort[pichrt].standage;
+  ofstate << cohort[pichrt].chrtarea;
+  ofstate << cohort[pichrt].potveg;
+  ofstate << cohort[pichrt].currentveg;
+  ofstate << cohort[pichrt].subtype;
+  ofstate << cohort[pichrt].cmnt;
 
 
   for( i = 0; i < MAXSTATE; ++i )
   {
-    ofstate << cohort[pichrt].y[i] << " ";
-    ofstate << cohort[pichrt].prevy[i] << " ";
+    ofstate << cohort[pichrt].y[i];
+    ofstate << cohort[pichrt].prevy[i];
   }
 
-  ofstate << cohort[pichrt].agcmnt << " ";
+  ofstate << cohort[pichrt].agcmnt;
 
-  ofstate << cohort[pichrt].aggrowdd << " ";
+  ofstate << cohort[pichrt].aggrowdd;
 
-  ofstate << cohort[pichrt].agkd << " ";
+  ofstate << cohort[pichrt].agkd;
 
-  ofstate << cohort[pichrt].agprvstate << " ";
+  ofstate << cohort[pichrt].agprvstate;
 
-  ofstate << cohort[pichrt].agstate << " ";
+  ofstate << cohort[pichrt].agstate;
 
-  ofstate << cohort[pichrt].avlh2o << " ";
+  ofstate << cohort[pichrt].avlh2o;
 
-  ofstate << cohort[pichrt].awcapmm << " ";
+  ofstate << cohort[pichrt].awcapmm;
 
-  ofstate << cohort[pichrt].c2n << " ";
+  ofstate << cohort[pichrt].c2n;
 
-  ofstate << cohort[pichrt].cneven << " ";
+  ofstate << cohort[pichrt].cneven;
 
-  ofstate << cohort[pichrt].convrtflx.carbon << " ";
-  ofstate << cohort[pichrt].convrtflx.nitrogen << " ";
-  ofstate << cohort[pichrt].standdead.carbon << " ";
-  ofstate << cohort[pichrt].standdead.nitrogen << " ";
-  ofstate << cohort[pichrt].vola.carbon << " ";
-  ofstate << cohort[pichrt].vola.nitrogen << " ";
+  ofstate << cohort[pichrt].convrtflx.carbon;
+  ofstate << cohort[pichrt].convrtflx.nitrogen;
+  ofstate << cohort[pichrt].standdead.carbon;
+  ofstate << cohort[pichrt].standdead.nitrogen;
+  ofstate << cohort[pichrt].vola.carbon;
+  ofstate << cohort[pichrt].vola.nitrogen;
 
-  ofstate << cohort[pichrt].cropResidue.carbon << " ";
-  ofstate << cohort[pichrt].cropResidue.nitrogen << " ";
+  ofstate << cohort[pichrt].cropResidue.carbon;
+  ofstate << cohort[pichrt].cropResidue.nitrogen;
 
-  ofstate << cohort[pichrt].croptopt << " ";
+  ofstate << cohort[pichrt].croptopt;
 
-  ofstate << cohort[pichrt].distmnthcnt << " ";
-  ofstate << cohort[pichrt].disturbflag << " ";
-  ofstate << cohort[pichrt].disturbmonth << " ";
+  ofstate << cohort[pichrt].distmnthcnt;
+  ofstate << cohort[pichrt].disturbflag;
+  ofstate << cohort[pichrt].disturbmonth;
 
-  ofstate << cohort[pichrt].fertflag << " ";
+  ofstate << cohort[pichrt].fertflag;
 
-  ofstate << cohort[pichrt].firemnthcnt << " ";
+  ofstate << cohort[pichrt].firemnthcnt;
 
-  ofstate << cohort[pichrt].formPROD10.carbon << " ";
-  ofstate << cohort[pichrt].formPROD10.nitrogen << " ";
+  ofstate << cohort[pichrt].formPROD10.carbon;
+  ofstate << cohort[pichrt].formPROD10.nitrogen;
 
-  ofstate << cohort[pichrt].formPROD100.carbon << " ";
-  ofstate << cohort[pichrt].formPROD100.nitrogen << " ";
+  ofstate << cohort[pichrt].formPROD100.carbon;
+  ofstate << cohort[pichrt].formPROD100.nitrogen;
 
+  ofstate << cohort[pichrt].FRI;
 
   for( dm = 0; dm < CYCLE; ++dm )
   {
-    ofstate << cohort[pichrt].initPROD1[dm].carbon << " ";
-    ofstate << cohort[pichrt].initPROD1[dm].nitrogen << " ";
+    ofstate << cohort[pichrt].initPROD1[dm].carbon;
+    ofstate << cohort[pichrt].initPROD1[dm].nitrogen;
   }
 
   for( i = 0; i < 10; ++i )
   {
-    ofstate << cohort[pichrt].initPROD10[i].carbon << " ";
-    ofstate << cohort[pichrt].initPROD10[i].nitrogen << " ";
+    ofstate << cohort[pichrt].initPROD10[i].carbon;
+    ofstate << cohort[pichrt].initPROD10[i].nitrogen;
   }
 
   for( i = 0; i < 100; ++i )
   {
-    ofstate << cohort[pichrt].initPROD100[i].carbon << " ";
-    ofstate << cohort[pichrt].initPROD100[i].nitrogen << " ";
+    ofstate << cohort[pichrt].initPROD100[i].carbon;
+    ofstate << cohort[pichrt].initPROD100[i].nitrogen;
   }
 
-  ofstate << cohort[pichrt].irrgflag << " ";
+  ofstate << cohort[pichrt].irrgflag;
 
-  ofstate << cohort[pichrt].kd << " ";
+  ofstate << cohort[pichrt].kd;
 
-  ofstate << cohort[pichrt].natseedC << " ";
+  ofstate << cohort[pichrt].natseedC;
 
-  ofstate << cohort[pichrt].natseedSTRN << " ";
+  ofstate << cohort[pichrt].natseedSTRN;
 
-  ofstate << cohort[pichrt].natseedSTON << " ";
+  ofstate << cohort[pichrt].natseedSTON;
 
-  ofstate << cohort[pichrt].natsoil << " ";
+  ofstate << cohort[pichrt].natsoil;
 
-  ofstate << cohort[pichrt].nattopt << " ";
+  ofstate << cohort[pichrt].nattopt;
 
-  ofstate << cohort[pichrt].newtopt << " ";
+  ofstate << cohort[pichrt].newtopt;
 
-  ofstate << cohort[pichrt].nretent << " ";
+  ofstate << cohort[pichrt].nretent;
 
-  ofstate << cohort[pichrt].nsretent << " ";
+  ofstate << cohort[pichrt].nsretent;
 
-  ofstate << cohort[pichrt].nvretent << " ";
+  ofstate << cohort[pichrt].nvretent;
 
-  ofstate << cohort[pichrt].prev2tair << " ";
+  ofstate << cohort[pichrt].prev2tair;
 
-  ofstate << cohort[pichrt].prevco2 << " ";
+  ofstate << cohort[pichrt].prevco2;
 
-  ofstate << cohort[pichrt].prevCropResidue.carbon << " ";
-  ofstate << cohort[pichrt].prevCropResidue.nitrogen << " ";
+  ofstate << cohort[pichrt].prevCropResidue.carbon;
+  ofstate << cohort[pichrt].prevCropResidue.nitrogen;
 
-  ofstate << cohort[pichrt].prevPROD1.carbon << " ";
-  ofstate << cohort[pichrt].prevPROD1.nitrogen << " ";
+  ofstate << cohort[pichrt].prevPROD1.carbon;
+  ofstate << cohort[pichrt].prevPROD1.nitrogen;
 
-  ofstate << cohort[pichrt].prevPROD10.carbon << " ";
-  ofstate << cohort[pichrt].prevPROD10.nitrogen << " ";
+  ofstate << cohort[pichrt].prevPROD10.carbon;
+  ofstate << cohort[pichrt].prevPROD10.nitrogen;
 
-  ofstate << cohort[pichrt].prevPROD100.carbon << " ";
-  ofstate << cohort[pichrt].prevPROD100.nitrogen << " ";
+  ofstate << cohort[pichrt].prevPROD100.carbon;
+  ofstate << cohort[pichrt].prevPROD100.nitrogen;
 
-  ofstate << cohort[pichrt].prevspack << " ";
+  ofstate << cohort[pichrt].prevspack;
 
-  ofstate << cohort[pichrt].prevtair << " ";
+  ofstate << cohort[pichrt].prevtair;
 
-  ofstate << cohort[pichrt].prod10par << " ";
+  ofstate << cohort[pichrt].prod10par;
 
-  ofstate << cohort[pichrt].prod100par << " ";
+  ofstate << cohort[pichrt].prod100par;
 
-  ofstate << cohort[pichrt].productYear << " ";
+  ofstate << cohort[pichrt].productYear;
 
-  ofstate << cohort[pichrt].prvchrtarea << " ";
+  ofstate << cohort[pichrt].prvchrtarea;
 
-  ofstate << cohort[pichrt].prvcropnpp << " ";
+  ofstate << cohort[pichrt].prvcropnpp;
 
-  ofstate << cohort[pichrt].rprec << " ";
+  ofstate << cohort[pichrt].rprec;
   
-  ofstate << cohort[pichrt].rdemandc << " ";
+  ofstate << cohort[pichrt].rdemandc;
   
-  ofstate << cohort[pichrt].rdemandn << " ";
+  ofstate << cohort[pichrt].rdemandn;
 
-  ofstate << cohort[pichrt].reet << " ";
+  ofstate << cohort[pichrt].reet;
   
-  ofstate << cohort[pichrt].rlabilec << " ";
+  ofstate << cohort[pichrt].rlabilec;
   
-  ofstate << cohort[pichrt].rlabilen << " ";
+  ofstate << cohort[pichrt].rlabilen;
   
-  ofstate << cohort[pichrt].rgpp << " ";
+  ofstate << cohort[pichrt].rgpp;
   
-  ofstate << cohort[pichrt].ringpp << " ";
+  ofstate << cohort[pichrt].ringpp;
 
-  ofstate << cohort[pichrt].rnpp << " ";
+  ofstate << cohort[pichrt].rnpp;
 
-  ofstate << cohort[pichrt].rltrc << " ";
+  ofstate << cohort[pichrt].rltrc;
 
-  ofstate << cohort[pichrt].rpleaf << " ";
+  ofstate << cohort[pichrt].rpleaf;
 
-  ofstate << cohort[pichrt].rrh << " ";
+  ofstate << cohort[pichrt].rrh;
 
-  ofstate << cohort[pichrt].rtair << " ";
+  ofstate << cohort[pichrt].rtair;
 
-  ofstate << cohort[pichrt].rtairphi << " ";
+  ofstate << cohort[pichrt].rtairphi;
 
-  ofstate << cohort[pichrt].rphi << " ";
+  ofstate << cohort[pichrt].rphi;
 
-  ofstate << cohort[pichrt].phicnt << " ";
+  ofstate << cohort[pichrt].phicnt;
 
-  ofstate << cohort[pichrt].qc << " ";
+  ofstate << cohort[pichrt].qc;
 
-  ofstate << cohort[pichrt].sconvert << " ";
+  ofstate << cohort[pichrt].sconvert;
 
-  ofstate << cohort[pichrt].sconvrtflx.carbon << " ";
-  ofstate << cohort[pichrt].sconvrtflx.nitrogen << " ";
+  ofstate << cohort[pichrt].sconvrtflx.carbon;
+  ofstate << cohort[pichrt].sconvrtflx.nitrogen;
 
-  ofstate << cohort[pichrt].slash.carbon << " ";
-  ofstate << cohort[pichrt].slash.nitrogen << " ";
+  ofstate << cohort[pichrt].slash.carbon;
+  ofstate << cohort[pichrt].slash.nitrogen;
 
-  ofstate << cohort[pichrt].slashpar << " ";
+  ofstate << cohort[pichrt].slashpar;
 
-  ofstate << cohort[pichrt].tillflag << " ";
+  ofstate << cohort[pichrt].tillflag;
 
-  ofstate << cohort[pichrt].topt << " ";
+  ofstate << cohort[pichrt].topt;
 
-  ofstate << cohort[pichrt].tqc << " ";
+  ofstate << cohort[pichrt].tqc;
 
-  ofstate << cohort[pichrt].vconvert << " ";
+  ofstate << cohort[pichrt].vconvert;
 
-  ofstate << cohort[pichrt].vconvrtflx.carbon << " ";
-  ofstate << cohort[pichrt].vconvrtflx.nitrogen << " ";
+  ofstate << cohort[pichrt].vconvrtflx.carbon;
+  ofstate << cohort[pichrt].vconvrtflx.nitrogen;
 
-  ofstate << cohort[pichrt].vrespar << " ";
+  ofstate << cohort[pichrt].vrespar;
 
 //  ofstate << cohort[pichrt].wiltpt << " ";
 
-  ofstate << cohort[pichrt].yrltrc << " ";
-  ofstate << cohort[pichrt].yrltrn << " ";
+  ofstate << cohort[pichrt].yrltrc;
+  ofstate << cohort[pichrt].yrltrn;
   
-  ofstate << cohort[pichrt].yrpleaf << " ";
-  ofstate << cohort[pichrt].yrpsapwood << " ";
-  ofstate << cohort[pichrt].yrproot << " ";
+  ofstate << cohort[pichrt].yrpleaf;
+  ofstate << cohort[pichrt].yrpsapwood;
+  ofstate << cohort[pichrt].yrproot;
   
-  ofstate << cohort[pichrt].yralloclc << " ";
-  ofstate << cohort[pichrt].yrallocsc << " ";
-  ofstate << cohort[pichrt].yrallocrc << " ";
+  ofstate << cohort[pichrt].yralloclc;
+  ofstate << cohort[pichrt].yrallocsc;
+  ofstate << cohort[pichrt].yrallocrc;
   
-  ofstate << cohort[pichrt].yrrmleaf << " ";
-  ofstate << cohort[pichrt].yrrmsapwood << " ";
-  ofstate << cohort[pichrt].yrrmroot << " ";
+  ofstate << cohort[pichrt].yrrmleaf;
+  ofstate << cohort[pichrt].yrrmsapwood;
+  ofstate << cohort[pichrt].yrrmroot;
+
+  ofstate << cohort[pichrt].dgppdrootc;
+  ofstate << cohort[pichrt].soninput;
+  ofstate << cohort[pichrt].toptmic;
+  ofstate << cohort[pichrt].yrallocseedc;
+  ofstate << cohort[pichrt].yrpseed;
   
-  ofstate << endl;
 
 };
 

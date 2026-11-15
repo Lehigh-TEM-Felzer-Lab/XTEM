@@ -1,79 +1,32 @@
-/* *************************************************************
-atmdepdat_gds.CPP - object to read and write the structure of
-                   land use/land cover data from/to files
-
-Modifications:
-
-20060422 - DWK created by modifying lulcdat437.cpp
-20060422 - DWK changed include from lulcdat437.h to lulcdat44.h
-20060422 - DWK changed Lulcdata43:: to Lulcdata44::
-20060422 - DWK added int disturbflag and int disturbmonth to
-           functions
-20070105 - TWC renamed to lulcdat45
-
-************************************************************* */
-
-#include<cstdio>
-
-  using std::fscanf;
-  using std::FILE;
-
-#include<iostream>
-
-  using std::ios;
-  using std::endl;
-
-#include<fstream>
-
-  using std::ifstream;
-  using std::ofstream;
-
-#include<iomanip>
-
-  using std::setprecision;
-
-#include<string>
-
-  using std::string;
-
+// nfertdat_gds.cpp
+// Version: XTEM version 4.5
+// 20241110 Changed: version number 4.5 (only the input and output, configuration and time handling changed).
+// 20241110 Changed: col and row renamed lon and lat.
+// 20241109 Updated: annual nitrogen fertilizer rate of a cell, read from NetCDF.
 
 #include "nfertdat_gds.h"
-
+#include "tem_netcdf_io.h"
 
 Nfertdat::Nfertdat( void )
 {
 
-  nfertend = 1;
-  lagpos = -99;
-  curpos = 0;
+  nfertval = 0.0;
+}
 
-};
-
-/* **************************************************************
-                    Public Functions
-************************************************************** */
-
-/* *************************************************************
-************************************************************* */
-
-
-/* *************************************************************
-************************************************************* */
-
-int Nfertdat::getdel( FILE* infile )
+int Nfertdat::read( tem::nc::Stream* infile )
 {
 
-  nfertend = fscanf( infile,
-                    "%f,%f,%d,%f",
-                    &col,
-                    &row,
-                    &year,
-                    &nfertval );
+  tem::nc::Record r;
 
+  const int nfertend = tem::nc::next( infile, r );
+
+  if( 1 == nfertend )
+  {
+    lon = r.lon;
+    lat = r.lat;
+    year = r.year;
+    nfertval = (float) r.v[0];
+  }
 
   return nfertend;
-
-};
-
-/* *************************************************************
-************************************************************* */
+}

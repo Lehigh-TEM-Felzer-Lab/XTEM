@@ -7,7 +7,33 @@
  MAXWSTAT: from 3 to 5
  NUMATMS: from 10 to 18
 
+Version: XTEM version 4.5
+20241110 Changed: version number 4.5 (only the input and output, configuration and time handling changed).
+20241110 Changed: col and row renamed lon and lat.
+20241111 Changed: MAXCMNT from 23 to 24: the parameter files of GDSTEM-FIRE (params/gdstem_fire) have 23 communities.
+20241109 Updated: The number of steps per year is a build option (TEM_MAXCYCLE) with CYCLE set at run time,
+         and NUMTEM grows by 32 for the new output variables.
+20241109 Updated: TEM_ENABLE_STORM switches the storm and hurricane code on (make STORM=1, the default) or
+         off.
+20241109 Changed: MAXCYCLE is 366 and not a compile-time option; CYCLE is set at run time, so one build runs
+         monthly or daily steps.
+20241110 Changed: MAXCYCLE, MAXRTIME and MAXCHRTS are removed. The arrays are sized at run time from CYCLE (steps
+         per year), NYEARS (years held per cell) and NCOHORTS (cohort dimension of the land-cover input).
+
 */
+
+#include <cstddef>
+#include <vector>
+
+// TEM_ENABLE_FIRE switches the wildfire code on (make FIRE=1, the default) or leaves it out (make FIRE=0). A build without
+// fire stops with a message when the configuration sets veg_fire to 1, and does not open the fire inputs.
+#ifndef TEM_ENABLE_FIRE
+  #define TEM_ENABLE_FIRE 1
+#endif
+
+#ifndef TEM_ENABLE_STORM
+  #define TEM_ENABLE_STORM 1
+#endif
 
 #ifndef ACCEPT_CONST
 #define ACCEPT_CONST
@@ -20,22 +46,29 @@
   const int CROPVEG = 50;
 #endif
 
-// Number of months in an annual cycle
+// Sizes set at run time. CYCLE: steps in a year, from run_dt and run_dt_units (tem_config.yaml). NYEARS: years
+// held per cell (spin-up, transient and equilibrium years). NCOHORTS: cohort dimension of the land-cover input.
+// Arrays are vectors sized from these once they are known (allocate() of the classes).
 #ifndef CYCLE_CONST
 #define CYCLE_CONST
-  const int CYCLE = 12;
+  inline int CYCLE = 12;
+  inline int NYEARS = 1;
+  inline int NCOHORTS = 1;
 #endif
 
-// Maximum number of cohorts in a grid cell
-#ifndef MAXCHRTS_CONST
-#define MAXCHRTS_CONST
-  const int MAXCHRTS = 3000;
+#ifndef TEM_VEC_HELPERS
+#define TEM_VEC_HELPERS
+// Zero-filled vectors of 1, 2 and 3 dimensions: the indexing of the arrays they replace is unchanged.
+template <class T> std::vector<T> vec1( std::size_t n ) { return std::vector<T>( n ); }
+template <class T> std::vector<std::vector<T>> vec2( std::size_t n, std::size_t m ) { return std::vector<std::vector<T>>( n, std::vector<T>( m ) ); }
+template <class T> std::vector<std::vector<std::vector<T>>> vec3( std::size_t n, std::size_t m, std::size_t k )
+{ return std::vector<std::vector<std::vector<T>>>( n, std::vector<std::vector<T>>( m, std::vector<T>( k ) ) ); }
 #endif
 
 // Maximum number of community types for TEM parameters
 #ifndef MAXCMNT_CONST
 #define MAXCMNT_CONST
-  const int MAXCMNT = 23;
+  const int MAXCMNT = 24;
 #endif
 
 // Maximum number of ecosystem (i.e. carbon and nitrogen)
@@ -54,12 +87,6 @@
 #ifndef MAXGRID_CONST
 #define MAXGRID_CONST
   const int MAXGRID = 1;
-#endif
-
-// Maximum number of years in a simulation
-#ifndef MAXRTIME_CONST
-#define MAXRTIME_CONST
-  const int MAXRTIME = 500;
 #endif
 
 // Maximum number of water pool variables
@@ -109,7 +136,7 @@ const int NUMATMS = 18;
   const int URBAN = 40;
 #endif
 
-// constant indicating row number for display purposes in ctem
+// constant indicating lat number for display purposes in ctem
 #ifndef VPARAMS_ROW_CONST
 #define VPARAMS_ROW_CONST
   const int VPARAMS_ROW = 32;
@@ -154,6 +181,6 @@ const int NUMATMS = 18;
 // Total number of output variables from TEM
 #ifndef NUMTEM_CONST
 #define NUMTEM_CONST
-  const int NUMTEM = NUMEQ + 99;
+  const int NUMTEM = NUMEQ + 130;
 #endif
 

@@ -4,6 +4,16 @@ TVEG_GDS.H -  Vegetation characteristics used in the Terrestrial
                 Ecosystem Model (TEM)
 
 ****************************************************************
+Version: XTEM version 4.5
+20241110 Changed: version number 4.5 (only the input and output, configuration and time handling changed).
+20241109 Changed: Parameters are read with tem::yaml::Reader (tem_yaml.h) instead of ProcessXML, because the
+         parameter files are YAML.
+20241109 Updated: The potential and actual evapotranspiration are kept (getPOTEVAP, getACTEVAP) for the
+         output.
+20241109 Fixed: Numbers are parsed strictly: a missing key or a value that is not a number stops the run, with
+         the file and key named (atoi and atof read such values as 0).
+20241110 Changed: fsr, fd, rswf_min, rswf_max are read by getecd (all four or none).
+
 ************************************************************* */
 
 #ifndef TVEG_GDS_H
@@ -18,10 +28,10 @@ TVEG_GDS.H -  Vegetation characteristics used in the Terrestrial
 
 #include "temconsts_gds.hpp"
 #include "bioms_gds.hpp"
-#include "tprocessXML_gds.h"
+#include "tem_yaml.h"
 #include "penmon_gds.h"
 
-class Tveg45 : public ProcessXML45
+class Tveg45
 {
 
   public:
@@ -737,6 +747,15 @@ class Tveg45 : public ProcessXML45
        return nnf[pcmnt];
      };
 
+     // fsr, fd, rswf_min and rswf_max of the communities, read with the vegetation YAML file (optional keys)
+
+     inline double getIGEF( const int& pcmnt ) const { return igef[pcmnt]; }
+     inline void setIGEF( const double& pigef, const int& pcmnt ) { igef[pcmnt] = pigef; }
+     inline double getFSR( const int& pcmnt ) const { return fsr[pcmnt]; }
+     inline double getFD( const int& pcmnt ) const { return fd[pcmnt]; }
+     inline double getRSWF_MIN( const int& pcmnt ) const { return rswf_min[pcmnt]; }
+     inline double getRSWF_MAX( const int& pcmnt ) const { return rswf_max[pcmnt]; }
+
      inline void setNNF( const double& pnnf,
                             const int& pcmnt )
      {
@@ -819,6 +838,9 @@ class Tveg45 : public ProcessXML45
      {
        o3parc[pcmnt] = po3parc;
      };
+
+   inline double getPOTEVAP( void ) { return potevap; };
+   inline double getACTEVAP( void ) { return actevap; };
 
    // pecanw *************************************************
 
@@ -1468,6 +1490,8 @@ class Tveg45 : public ProcessXML45
      double pesoilw;
      double esoilmmmo;
      double pecanw;
+     double potevap;
+     double actevap;
      double shfluxw;
 
      // PET
@@ -1551,7 +1575,7 @@ class Tveg45 : public ProcessXML45
 		 Private Parameters
 ************************************************************* */
      
-     /// PFT-specific vegetation parameters, found in .dat file
+     /// PFT-specific vegetation parameters, read from the YAML parameter files
 
      double cmax;
      double cmax1b[MAXCMNT];
@@ -1581,11 +1605,19 @@ class Tveg45 : public ProcessXML45
      
      double nnf[MAXCMNT];
 
+     // GDSTEM-FIRE (veg_fire 1): ignition efficiency, fire spread rate (m s-1), fire duration (h), root-zone soil wetness
+     // limits; MISSING when the vegetation file does not give them
+     double igef[MAXCMNT];
+     double fsr[MAXCMNT];
+     double fd[MAXCMNT];
+     double rswf_min[MAXCMNT];
+     double rswf_max[MAXCMNT];
+
      double o3para[MAXCMNT];
      double o3parb[MAXCMNT];
      double o3parc[MAXCMNT]; 
 
-     // PFT-specific vegetation parameters, found in veg.ecd file
+     // PFT-specific vegetation parameters, read from the YAML vegetation file (tveg45_lulc.yaml)
 
      double kc[MAXCMNT];
      double ki[MAXCMNT];

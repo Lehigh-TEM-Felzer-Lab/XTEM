@@ -4,14 +4,12 @@ TBIOME_GDS.CPP - object describing general characteristics of
                    vegetation mosaic used in the Terrestrial
 	           Ecosystem Model (TEM)
 
-Modifications:
-
-20060126 - DWK created by modifying tbiome50b5.cpp
-20060126 - DWK changed include tbiome50b5.h to tbiome437.h
-20060126 - DWK changed Biome50:: to Biome43::
-20060126 - DWK changed inheritance from ProcessXML50 to
-           ProcessXML43 in Biome43()
-20070105 - TWC changed name to tbiome45
+Version: XTEM version 4.5
+20241110 Changed: version number 4.5 (only the input and output, configuration and time handling changed).
+20241109 Changed: Parameters are read with tem::yaml::Reader (tem_yaml.h) instead of ProcessXML, because the
+         parameter files are YAML.
+20241109 Fixed: Numbers are parsed strictly: a missing key or a value that is not a number stops the run, with
+         the file and key named (atoi and atof read such values as 0).
 
 ****************************************************************
 ************************************************************* */
@@ -49,7 +47,7 @@ Modifications:
 /* *************************************************************
 ************************************************************* */
 
-Biome45::Biome45( void ) : ProcessXML45()
+Biome45::Biome45( void )
 {
   temveg = -99;
 
@@ -154,7 +152,6 @@ int Biome45::getVegSubtype( const int& tveg, const int& dtype )
 
 void Biome45::getvtype( const string& ecd )
 {
-  ifstream infile;
   int dv;
   int dtype;
   int vegtype;
@@ -162,23 +159,21 @@ void Biome45::getvtype( const string& ecd )
 
   ostringstream tempString;
 
-  infile.open( ecd.c_str(), ios::in );
+  tem::yaml::Reader infile( ecd );
 
-  if( !infile )
+
+  // The number of community types is the number of entries in the file. It may not exceed NUMVEG.
+  const int nentries = static_cast<int>( infile.entryCount( "temveg" ) );
+  if( nentries > NUMVEG )
   {
-    cerr << endl << "Cannot open " << ecd;
-    cerr << " for community ECD input" << endl;
+    cerr << endl << ecd << " has " << nentries << " temveg entries but NUMVEG is " << NUMVEG << endl;
     exit( -1 );
   }
 
-  getXMLrootNode( infile, "communityECD" );
-
-
-  for( dv = 0; dv < NUMVEG; ++dv )
+  for( dv = 0; dv < nentries; ++dv )
   {
 
-    vegtype = getXMLtemvegNode( infile, "communityECD" );
-//    cout << "dv and vegtype = " << dv << " " << vegtype << endl;
+    vegtype = infile.nextTemveg();
 
     if( vegtype > NUMVEG )
     {
@@ -190,42 +185,29 @@ void Biome45::getvtype( const string& ecd )
 
     ez = vegtype - 1;
 
-    numtype[ez] = getXMLtvegArrayInt( infile,
-                                      "communityECD",
-                                      "numtype",
-                                      vegtype );
+    numtype[ez] = infile.getInt( "numtype" );
 
     for( dtype = 0; dtype < NUMMSAC; ++dtype )
     {
       tempString.str( "" );
       tempString << "subtype" << (dtype+1);
-      subtype[ez][dtype] = getXMLtvegArrayInt( infile,
-                                               "communityECD",
-                                               tempString.str(),
-                                               vegtype );
+      subtype[ez][dtype] = infile.getInt( tempString.str() );
 
       tempString.str( "" );
       tempString << "pcttype" << (dtype+1);
-      pcttype[ez][dtype] = getXMLtvegArrayDouble( infile,
-                                                  "communityECD",
-                                                  tempString.str(),
-                                                  vegtype );
-//      cout << "subtupe = " << ez << " " << dtype << " " << subtype[ez][dtype] << " " << pcttype[ez][dtype] << endl;
+      pcttype[ez][dtype] = infile.getDouble( tempString.str() );
     }
 
-    endXMLtvegNode( infile );
+    infile.endEntry();
   }
 
 
-  if( dv < NUMVEG )
+  if( 0 == dv )
   {
-    cerr << endl << " Parameters found for only " << dv;
-    cerr << " community types out of a maximum of ";
-    cerr << (NUMVEG-1) << " types in communityECD" << endl;
+    cerr << endl << " No community types found in communityECD " << ecd << endl;
     exit( -1 );
   }
 
-  infile.close();
 
 };
 

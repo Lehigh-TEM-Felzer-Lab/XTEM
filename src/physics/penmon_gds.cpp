@@ -2,10 +2,18 @@
 *****************************************************************
 PENMON_GDS.CPP - object computes EET using Penman-Monteith
 
-Modifications:
+Version: XTEM version 4.5
+20241110 Changed: version number 4.5 (only the input and output, configuration and time handling changed).
+20241109 Changed: Parameters are read with tem::yaml::Reader (tem_yaml.h) instead of ProcessXML, because the
+         parameter files are YAML.
+20241109 Changed: The days of a step come from Timestep (ttimestep.h) and arrays are sized MAXCYCLE, so the
+         step is set by run_dt and run_dt_units and is not fixed at twelve months.
+20241109 Updated: The actual evapotranspiration is kept (getACTEVAP) for the output.
+20241109 Fixed: Numbers are parsed strictly: a missing key or a value that is not a number stops the run, with
+         the file and key named (atoi and atof read such values as 0).
+20241110 Changed: Yearly and per-step arrays are std::vector sized at run time (CYCLE, NYEARS, NCOHORTS);
+         MAXCYCLE, MAXRTIME and MAXCHRTS removed.
 
-20040330 - BSF created
-20070105 - TWC renamed penmonflux to penmon45
 ****************************************************************
 ************************************************************* */
 
@@ -44,25 +52,15 @@ Modifications:
 
   using std::string;
 
+#include "ttimestep.h"
 #include "penmon_gds.h"
 
 
-Penmon45::Penmon45() : ProcessXML45()
+Penmon45::Penmon45()
 {
   // Number of days per month
 
-  ndays[0] = 31;
-  ndays[1] = 28;
-  ndays[2] = 31;
-  ndays[3] = 30;
-  ndays[4] = 31;
-  ndays[5] = 30;
-  ndays[6] = 31;
-  ndays[7] = 31;
-  ndays[8] = 30;
-  ndays[9] = 31;
-  ndays[10] = 30;
-  ndays[11] = 31;
+  setNDAYS();
 
   CPAIR = 1010.0; // air specific heat (J kg^-1)
   RHOAIR = 1.292; // air density (kg m^-3)
@@ -371,6 +369,8 @@ instead of the source height vpd.
     
     vpdo = vpd + r_aa*(beta*rn - (beta + PSY*exp_h)*etsw)/(CPAIR*RHOAIR*exp_h);
 
+    actevap = etsw*(etimes*ndays[dm])/LAMBDA; // mm h2o step^-1, without interception and the esoilmmmo additions
+
     etsw *= (etimes*ndays[dm])/LAMBDA; // convert to mm h2o month^-1
     etsw += ecanmmmo+esoilmmmo;
 
@@ -498,24 +498,16 @@ double Penmon45::watev(  const double& nirr,
 
 void Penmon45::getecd( const string& ecd )
 {
-  ifstream infile;
   int dcmnt;
   int comtype;
 
 
-  infile.open( ecd.c_str(), ios::in );
+  tem::yaml::Reader infile( ecd );
+  const int ncommunity = infile.communityCount( MAXCMNT - 1 );
 
-  if ( !infile )
-  {
-    cerr << "\nCannot open " << ecd << " for gc ECD input" << endl;
-    exit( -1 );
-  }
-
-  getXMLrootNode( infile, "gcECD" );
-
-  for ( dcmnt = 1; dcmnt < MAXCMNT; ++dcmnt )
+  for( dcmnt = 1; dcmnt <= ncommunity; ++dcmnt )
   {  
-    comtype = getXMLcommunityNode( infile, "gcECD" );
+    comtype = infile.nextCommunity();
 
     if( comtype >= MAXCMNT )
     {
@@ -527,75 +519,51 @@ void Penmon45::getecd( const string& ecd )
       exit( -1 );
     }
 
-    cdleaf[comtype] = getXMLcmntArrayDouble( infile,
-                                             "gcECD",
-                                             "cdleaf",
-                                             comtype );
+    cdleaf[comtype] = infile.getDouble( "cdleaf" );
 
-    wleaf[comtype] = getXMLcmntArrayDouble( infile,
-                                         "gcECD",
-                                         "wleaf",
-                                         comtype );
+    wleaf[comtype] = infile.getDouble( "wleaf" );
 
 
-    gsa[comtype] = getXMLcmntArrayDouble( infile,
-                                           "gcECD",
-                                           "gsa",
-                                           comtype );
+    gsa[comtype] = infile.getDouble( "gsa" );
 
-    gsmin[comtype] = getXMLcmntArrayDouble( infile,
-                                           "gcECD",
-                                           "gsmin",
-                                           comtype );
+    gsmin[comtype] = infile.getDouble( "gsmin" );
 
-    kext[comtype]= getXMLcmntArrayDouble( infile,
-                                            "gcECD",
-                                            "kext",
-                                            comtype );
+    kext[comtype]= infile.getDouble( "kext" );
 
-    albedo[comtype]= getXMLcmntArrayDouble( infile,
-                                        "gcECD",
-                                        "albedo",
-                                        comtype );
+    albedo[comtype]= infile.getDouble( "albedo" );
                                         
-    lscmin[comtype]= getXMLcmntArrayDouble( infile,
-                                        "gcECD",
-                                        "lscmin",
-                                        comtype );
+    lscmin[comtype]= infile.getDouble( "lscmin" );
                                         
-    groot[comtype]= getXMLcmntArrayDouble( infile,
-                                        "gcECD",
-                                        "groot",
-                                        comtype );
+    groot[comtype]= infile.getDouble( "groot" );
                                         
-    kstem[comtype]= getXMLcmntArrayDouble( infile,
-                                        "gcECD",
-                                        "kstem",
-                                        comtype );
+    kstem[comtype]= infile.getDouble( "kstem" );
     
-    rhostem[comtype]= getXMLcmntArrayDouble( infile,
-                                        "gcECD",
-                                        "rhostem",
-                                        comtype );
+    rhostem[comtype]= infile.getDouble( "rhostem" );
 
 
-    endXMLcommunityNode( infile );
+    infile.endEntry();
 
   }
 
 
-  if ( dcmnt < MAXCMNT )
+  if( ncommunity < 1 )
   {
-    cerr << endl << " Parameters found for only " << dcmnt;
+    cerr << endl << " No community types found" << "";
     cerr << " community types out of a maximum of ";
     cerr << (MAXCMNT-1) << " types in gcECD" << endl;
     exit( -1 );
   }
 
-  infile.close();
 
 };
 /* *************************************************************
 ************************************************************* */
 
 
+
+
+void Penmon45::setNDAYS( void )
+{
+  ndays.assign( CYCLE, 0 );
+  for( int i = 0; i < CYCLE; ++i ) { ndays[i] = getTimestep45().getDAYS( i ); }
+};

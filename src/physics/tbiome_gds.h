@@ -4,16 +4,12 @@ TBIOME_GDS.H - object describing general characteristics of
                  vegetation mosaic used in the Terrestrial
                  Ecosystem Model (TEM)
 
-Modifications:
-
-20060114 - DWK created by modifying tbiome50b5.h
-20060114 - DWK changed include from temconsts51.hpp to
-           temconsts43.hpp
-20060114 - DWK changed include from tprocessXML50b5.h to
-           tprocessXML437.h
-20060114 - DWK changed inheritance from ProcessXML50 to
-           ProcessXML43
-20070105 - TWC changed name to tbiome45
+Version: XTEM version 4.5
+20241110 Changed: version number 4.5 (only the input and output, configuration and time handling changed).
+20241109 Changed: Parameters are read with tem::yaml::Reader (tem_yaml.h) instead of ProcessXML, because the
+         parameter files are YAML.
+20241109 Fixed: Numbers are parsed strictly: a missing key or a value that is not a number stops the run, with
+         the file and key named (atoi and atof read such values as 0).
 
 ****************************************************************
 ************************************************************* */
@@ -22,10 +18,10 @@ Modifications:
 #define TBIOME_GDS_H
 
 #include "temconsts_gds.hpp"
-#include "tprocessXML_gds.h"
+#include "tem_yaml.h"
 
 
-class Biome45 : public ProcessXML45
+class Biome45
 {
 
   public:

@@ -1,10 +1,14 @@
 /* **************************************************************
 *****************************************************************
-BIOMS_GDS.HPP - describes components comprising biomass
+BIOMS45.HPP - describes components comprising biomass
 *****************************************************************
+Version: XTEM version 4.5
+20241110 Changed: version number 4.5 (only the input and output, configuration and time handling changed).
+20241109 Changed: the names have the suffix 50; nothing else.
+
 ************************************************************** */
-#ifndef BIOMS_GDS_HPP
-#define BIOMS_GDS_HPP
+#ifndef BIOMS45_HPP
+#define BIOMS45_HPP
 
 class Biomass {
 

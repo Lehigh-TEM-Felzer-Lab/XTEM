@@ -4,23 +4,17 @@ TMCRB_GDS.CPP - object describing characteristics of soil
                  microbes used in the Terrestrial Ecosystem Model
                  (TEM)
 
-Modifications:
-
-20060126 - DWK created by modifying tmcrb50b5.cpp
-20060126 - DWK changed include from tmcrb50b5.h to tmcrb437.h
-20060126 - DWK changed Tmicrobe50:: to Tmicrobeflux::
-20060126 - DWK changed inheritance from ProcessXML50 to
-           ProcessXML43 in Tmicrobeflux()
-20060126 - DWK deleted double tsoil and int tsoilflg from
-           setDQ10()
-20070105 - TWC changed name to tmcrb45
-2007 - TWC/BSF
-     getvegecd: add rhq10, rhalpha, rhbeta, rhgamma,
-	      rhqref, rhtref (instead of tref, qref, alpha,
-		  beta, gamma)
-     nminxclm: add condt: if(nmin+availn < 0) nmin = -availn
-	 rhxclm: replace dq10 with pdq10
-	 setDQ10LaRS (setNew DQ10 in TEM44): new LARS function
+Version: XTEM version 4.5
+20241110 Changed: version number 4.5 (only the input and output, configuration and time handling changed).
+20241109 Changed: Parameters are read with tem::yaml::Reader (tem_yaml.h) instead of ProcessXML, because the
+         parameter files are YAML.
+20241109 Updated: The moisture function of heterotrophic respiration is chosen at run time (rhmoist_method)
+         instead of by the compile flag RHMOIST_WFPS.
+20241109 Fixed: Numbers are parsed strictly: a missing key or a value that is not a number stops the run, with
+         the file and key named (atoi and atof read such values as 0).
+20241109 Fixed: The wet-filled pore space (wfps) is initialised; it was read before being set when the
+         moisture function did not use it.
+20241109 Changed: The decomposition rate kd is scaled to the step by rateToStep (step seconds / month seconds).
 
 *****************************************************************
 ************************************************************** */
@@ -61,17 +55,16 @@ Modifications:
 
   using std::string;
   
-//#define RHMOIST_SECH
-#define RHMOIST_WFPS
-//#define RHMOIST_DNDC
 
 #include "tmcrb_gds.h"
 
 /* **************************************************************
 ************************************************************** */
 
-Tmcrb45::Tmcrb45() : ProcessXML45()
+Tmcrb45::Tmcrb45()
 {
+
+  rhmoistmethod = 1;
 
   // Initialize variables to MISSING values
 
@@ -98,26 +91,16 @@ Tmcrb45::Tmcrb45() : ProcessXML45()
 
 void Tmcrb45::getvegecd( const string& ecd )
 {
-  ifstream infile;
   int dcmnt;
   int comtype;
 
 
-  infile.open( ecd.c_str(), ios::in );
+  tem::yaml::Reader infile( ecd );
+  const int ncommunity = infile.communityCount( MAXCMNT - 1 );
 
-  if( !infile )
-  {
-    cerr << endl << "Cannot open " << ecd;
-    cerr << " for microbe ECD input" << endl;
-
-    exit( -1 );
-  }
-
-  getXMLrootNode( infile, "microbeECD" );
-
-  for( dcmnt = 1; dcmnt < MAXCMNT; ++dcmnt )
+  for( dcmnt = 1; dcmnt <= ncommunity; ++dcmnt )
   { 
-    comtype = getXMLcommunityNode( infile, "microbeECD" );
+    comtype = infile.nextCommunity();
        
 
     if( comtype >= MAXCMNT )
@@ -129,75 +112,41 @@ void Tmcrb45::getvegecd( const string& ecd )
     }
 
 
-    rhalpha[comtype]= getXMLcmntArrayDouble( infile,
-                                             "microbeECD",
-                                             "rhalpha",
-                                             comtype );
+    rhalpha[comtype]= infile.getDouble( "rhalpha" );
 
-    rhbeta[comtype]= getXMLcmntArrayDouble( infile,
-                                            "microbeECD",
-                                            "rhbeta",
-                                            comtype );
+    rhbeta[comtype]= infile.getDouble( "rhbeta" );
 
-    rhgamma[comtype]= getXMLcmntArrayDouble( infile,
-                                             "microbeECD",
-                                             "rhgamma",
-                                             comtype );
+    rhgamma[comtype]= infile.getDouble( "rhgamma" );
 
-    rhqref[comtype]= getXMLcmntArrayDouble( infile,
-                                            "microbeECD",
-                                            "rhqref",
-                                            comtype );
+    rhqref[comtype]= infile.getDouble( "rhqref" );
 
-    rhtref[comtype]= getXMLcmntArrayDouble( infile,
-                                            "microbeECD",
-                                            "rhtref",
-                                            comtype );
+    rhtref[comtype]= infile.getDouble( "rhtref" );
 
-    kn2[comtype] = getXMLcmntArrayDouble( infile,
-                                          "microbeECD",
-                                          "kn2",
-                                          comtype );
+    kn2[comtype] = infile.getDouble( "kn2" );
 
-    moistmin[comtype] = getXMLcmntArrayDouble( infile,
-                                               "microbeECD",
-                                               "moistmin",
-                                               comtype );
+    moistmin[comtype] = infile.getDouble( "moistmin" );
 
-    moistopt[comtype] = getXMLcmntArrayDouble( infile,
-                                               "microbeECD",
-                                               "moistopt",
-                                               comtype );
+    moistopt[comtype] = infile.getDouble( "moistopt" );
 
-    moistmax[comtype] = getXMLcmntArrayDouble( infile,
-                                               "microbeECD",
-                                               "moistmax",
-                                               comtype );
+    moistmax[comtype] = infile.getDouble( "moistmax" );
 
-    docfr[comtype] = getXMLcmntArrayDouble( infile,
-                                               "microbeECD",
-                                               "docfr",
-                                               comtype );
+    docfr[comtype] = infile.getDouble( "docfr" );
 
-    docdon[comtype] = getXMLcmntArrayDouble( infile,
-                                               "microbeECD",
-                                               "docdon",
-                                               comtype );
+    docdon[comtype] = infile.getDouble( "docdon" );
 
 
-    endXMLcommunityNode( infile );
+    infile.endEntry();
   }
 
-  if( dcmnt < MAXCMNT )
+  if( ncommunity < 1 )
   {
-    cerr << endl << " Parameters found for only " << dcmnt;
+    cerr << endl << " No community types found" << "";
     cerr << " community types out of a maximum of ";
     cerr << (MAXCMNT-1) << " types in microbeECD" << endl;
 
     exit( -1 );
   }
 
-  infile.close();
 
 };
 
@@ -384,7 +333,7 @@ double Tmcrb45::rhxclm( const double& soilorgc,
 //  double fsoil = 0.5;
   double fsoil = 0.0;
 
-  rh = kd * soilorgc * moist * pdq10;
+  rh = getTimestep45().rateToStep( kd, tem_time::SECONDS_PER_MONTH ) * soilorgc * moist * pdq10;
 //  rh += volac;
 //  cout << "rh = " << rh << " " << rltrc << " " << rrh << endl;
   return rh += fsoil*(rltrc-rrh);
@@ -485,7 +434,7 @@ double Tmcrb45::setRHMOIST( const int& pdcmnt,
 
   double rhxh2o;
   double vfc;
-  double wfps;
+  double wfps = ZERO; // set below when moisture limits decomposition; the cap at the end applies only then
   
   if( 0 == moistlim )
   {
@@ -503,11 +452,12 @@ double Tmcrb45::setRHMOIST( const int& pdcmnt,
 
     rhxh2o /= rhxh2o - pow( (vsm - moistopt[pdcmnt]), 2.0 );
     
-    #ifdef RHMOIST_WFPS
-      wfps = 100.0*vsm/pctpor;
+    wfps = 100.0*vsm/pctpor;
+    if( 1 == rhmoistmethod )
+    {
 //    Tim's original function
       rhxh2o = 0.2+0.8*wfps*(1.0-wfps)/(wfps*(1.0-wfps) + (0.6-wfps)*(0.6-wfps));
-    #endif
+    }
 //    Function with sigmoidal added
 //      rhxh2o = 0.2+(0.7/(1+exp(-100*(wfps-0.45)))+0.1)*wfps*(1.0-wfps)/(wfps*(1.0-wfps) + (0.6-wfps)*(0.6-wfps));
 /*     if( pdcmnt == 5 || pdcmnt == 6 )
@@ -519,7 +469,8 @@ double Tmcrb45::setRHMOIST( const int& pdcmnt,
 //     if( pdcmnt == 5 || pdcmnt == 6 )
 //     {
 //    DNDC function
-   #ifdef RHMOIST_DNDC
+   if( 2 == rhmoistmethod )
+   {
    if(wfps <= 0.1)
    {
      rhxh2o = 0.0;
@@ -537,9 +488,10 @@ double Tmcrb45::setRHMOIST( const int& pdcmnt,
     rhxh2o = -0.5*wfps+0.9;
    } 
 //  }  
-    #endif  
+   }
     
-    #ifdef RHMOIST_SECH
+    if( 3 == rhmoistmethod )
+    {
 //      vsmopt = (pctpor - 15.0)/100.0;
 //      vsmdenm = (pctpor - 15.0 - pctwiltpt)/100.0;
 //      rhxh2o = 0.2 + 0.8 * exp( -((vsm-vsmopt)*(vsm-vsmopt))/(0.4809*vsmdenm*vsmdenm) );
@@ -548,7 +500,7 @@ double Tmcrb45::setRHMOIST( const int& pdcmnt,
       rhxh2o = 1.0/rhxh2o;
 //      cout << " vsmopt = " << vsmopt << " " << rhxh2o << " " << vsm << " " << pctwiltpt << " " << pctpor << endl;
 //      exit(-1); 
-    #endif  
+    }
   }
 
 //  if( rhxh2o < ZERO ) { rhxh2o = ZERO; }

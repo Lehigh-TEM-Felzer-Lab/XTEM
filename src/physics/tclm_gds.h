@@ -2,27 +2,12 @@
 ****************************************************************
 TCLM_GDS.H - describes climate module used by TEM
 
-20060126 - DWK created by modifying tclm50b5.h
-20060126 - DWK changed include from temconsts51.hpp to
-           temconsts43.hpp
-20060126 - DWK changed include from atms50b5.h to atms437.h
-20060126 - DWK changed class TEMclm50 to class TEMclm43
-20060126 - DWK changed inheritance from Atmosphere50 to
-           Atmosphere43
-20060126 - DWK added I_AOT40 to TEMclm43()
-20060126 - DWK added public functions void initO3(),
-           double mkd40() and void setO3Flags()
-20060126 - DWK added public string io3end, string io3fname and
-           int to3flag
-2007 - TWC/BSF summary
-    clmkey: add VPD, TRANGE, DAYL, AOT40B, 
-	Public Functions: initVPD, initTRANGE, setTrangeFlags,
-	   setVPDFlags
-	Public Variables: io3bname, ivprend, ivprfname,
-	   itrangeend, itrangefname, ttrangeflag, tvprflag
+Version: XTEM version 4.5
+20241110 Changed: version number 4.5 (only the input and output, configuration and time handling changed).
+20241109 Updated: Adds tws10flag, the switch between transient and long-term average wind (xtws10flag).
+20241109 Changed: Inputs come from NetCDF through the drivers: the file-name and extension members of every
+         climate variable are removed.
 
-2008 - TWC added WS10, TAIRD, TAIRN, VPDD, VPDN -- 
-    windspeed at 10 m, day/night temperature and vpd
 ****************************************************************
 ************************************************************* */
 
@@ -100,78 +85,6 @@ class Tclm45 : public Atms45
 
 //     int co2year[MAXRTIME];       // year of CO2 data
 
-     ifstream fco2;
-
-     // Name of file extension and beginning of file name
-     //  for cloudiness data
-
-     string icldsend;
-     string icldsfname;
-
-     // Name of file extension and beginning of file name
-     //  for atmospheric CO2 concentration data
-
-     string ico2end;
-     string ico2fname;
-
-     // Name of file extension and beginning of file name
-     //  for gross irradiance (i.e., solar radiation at the
-     //  top of the atmosphere) data
-
-     string igirrend;
-     string igirrfname;
-
-     // Name of file extension and beginning of file name
-     //  for net irradiance (i.e. solar radiation at the
-     //  top of the vegetation canopy) data
-
-     string inirrend;
-     string inirrfname;
-
-     // Name of file extension and beginning of file name
-     //  for ozone (i.e. AOT40) data
-
-     string io3end;
-     string io3fname;
-
-
-     // Name of file extension and beginning of file name
-     //  for photosynthetically active radiation data
-
-     string iparend;
-     string iparfname;
-
-     // Name of file extension and beginning of file name
-     //  for precipitation data
-
-     string iprecend;
-     string iprecfname;
-
-
-     // Name of file extension and beginning of file name
-     //  for air temperature data
-
-     string itairend;
-     string itairfname;
-
-     // Name of file extension and beginning of file name
-     //  for daily temperature range data
-
-     string itrangeend;
-     string itrangefname;
-
-     // Name of file extension and beginning of file name
-     //  for vapor pressure data
-
-     string ivprend;
-     string ivprfname;
-
-     // Name of file extension and beginning of file name
-     // for windspeed data
-     
-     string iws10end;
-     string iws10fname;
-
      int parflag;     // Read in PAR from spatially explicit data sets?
 
      int predflag;    // Write climate module output to files?
@@ -194,7 +107,7 @@ class Tclm45 : public Atms45
 
      // transient CO2 concentration (ppmv)
 
-//     double tco2[MAXRTIME][CYCLE];
+//     double tco2[MAXRTIME][MAXCYCLE];
 
      // Flag for transient atmospheric CO2 data
      //   ( =0 for long-term mean data
@@ -232,6 +145,9 @@ class Tclm45 : public Atms45
      //      1 for transient data)
      int tvprflag;
 
+     // Flag for transient 10 m wind speed
+     //   ( =0 for long-term mean data
+     //      1 for transient data)
      int tws10flag;
 
      // Year represented by the climate data

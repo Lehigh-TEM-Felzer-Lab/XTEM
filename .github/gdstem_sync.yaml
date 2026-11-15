@@ -1,0 +1,37 @@
+# Settings of .github/scripts/sync_gdstem.py, which carries science changes from GDSTEM into src/.
+upstream: https://github.com/Lehigh-TEM-Felzer-Lab/GDSTEM.git
+branch: main
+# The GDSTEM commit whose changes are already in src/. The script moves it forward.
+last_synced: 719799c0691612cd93873327b5a14f1ed465df38
+
+# GDSTEM files that XTEM replaced with its own IO. Their changes are listed in the report and never applied.
+manual:
+  - ctem_gds.cpp
+  - xtem_gds.cpp
+  - xtem_gds_gofile.cpp
+  - tprocessXML_gds.*
+  - tclmdat_gds.*
+  - lulcdat_gds.*
+  - telvdat_gds.*
+  - tsoldat_gds.*
+  - atmdepdat_gds.*
+  - nfertdat_gds.*
+  - tmaxcohortdat_gds.*
+  - tlcluc_gds.*
+  - tatmdep_gds.*
+  - tco2dat_gds.*
+  - tdisturb_gds.*
+  - latdat_gds.*
+  - disturbdat_gds.*
+# GDSTEM files with no counterpart in XTEM and no reason to have one. Ignored.
+ignore:
+  - makefile*
+  - .gitignore
+  - README*
+  - .github/*
+# Parameter files: changes are listed in the report, to be made in params/*.yaml by hand.
+params:
+  - params/*
+  - "*.ecd"
+  - "*.dat"
+  - "*.xml"

@@ -2,9 +2,18 @@
 *****************************************************************
 PENMON_GDS.H - object computes EET using Penmon Monteith
 
-Modifications:
+Version: XTEM version 4.5
+20241110 Changed: version number 4.5 (only the input and output, configuration and time handling changed).
+20241109 Changed: Parameters are read with tem::yaml::Reader (tem_yaml.h) instead of ProcessXML, because the
+         parameter files are YAML.
+20241109 Changed: The days of a step come from Timestep (ttimestep.h) and arrays are sized MAXCYCLE, so the
+         step is set by run_dt and run_dt_units and is not fixed at twelve months.
+20241109 Updated: The actual evapotranspiration is kept (getACTEVAP) for the output.
+20241109 Fixed: Numbers are parsed strictly: a missing key or a value that is not a number stops the run, with
+         the file and key named (atoi and atof read such values as 0).
+20241110 Changed: Yearly and per-step arrays are std::vector sized at run time (CYCLE, NYEARS, NCOHORTS);
+         MAXCYCLE, MAXRTIME and MAXCHRTS removed.
 
-20040330 - BSF created
 *****************************************************************
 ************************************************************** */
 
@@ -15,14 +24,17 @@ Modifications:
 
 #include "temconsts_gds.hpp"
 
-// Penmon45 inherits ProcessXML45 Class
-#include "tprocessXML_gds.h"
+#include "tem_yaml.h"
 
-class Penmon45 : public ProcessXML45
+class Penmon45
 
 {
 
   public:
+
+     // Days of each step of the year; call after the run step is set
+     void setNDAYS( void );
+
 
      Penmon45();
 
@@ -347,6 +359,8 @@ class Penmon45 : public ProcessXML45
 
      inline double getNDAYS( const int& pdm ) { return ndays[pdm]; };
 
+     inline double getACTEVAP( void ) { return actevap; };
+
      // pecan *************************************************
 
      inline double getPECAN( void ) { return pecan; };
@@ -378,7 +392,7 @@ void setBETA( const double& tmean );
  // Evapotranspiration Variables
 
      double beta;
-     double ndays[CYCLE];
+     std::vector<double> ndays = std::vector<double>( 12 );
 
      double CPAIR;
      double DAYtoS;
@@ -395,6 +409,7 @@ void setBETA( const double& tmean );
      double dfws_drootc; 
 
      double pecan; // transpiration
+     double actevap; // actual evapotranspiration, mm step^-1
      double pesoil; // soil evaporation
      double shflux; // sensible heat flux
 

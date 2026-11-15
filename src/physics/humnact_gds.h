@@ -2,24 +2,16 @@
 ****************************************************************
 HUMNACT_GDS.H - describes human disturbances to natural ecosystems
 
-20060126 - DWK created by modifying humnact50b5.h
-20060126 - DWK changed include temconst51.hpp to temconst43.hpp
-20060126 - DWK changed include from tprocessXML51.h to
-           tprocessXML437.h
-20060126 - DWK changed include from tveg50b5.h to tveg437.h
-20060126 - DWK changed class Humanact50 to class Humanact43
-20060126 - DWK changed inheritance of ProcessXML50 to
-           ProcessXML43
-20070105 - TWC changed class Humanactflux to class Humnact45
-2007 - TWC/BSF summary
-   GDDMIN, GDDSEED, GDDHARVST, ISPERENNIAL, tkill: add to public
-     functions get/set (ISPREENNIAL only get) and declarations
-	 in private variables
-   Remove up-front declarations of GDDMIN, GDDSEED, GDDHARVST,
-     MAXFRI
-   Add distflag and fert1950flag to public vars.
-   Remove firendep from private vars. and add to private parameters,
-      also add RAP to private parameters
+Version: XTEM version 4.5
+20241110 Changed: version number 4.5 (only the input and output, configuration and time handling changed).
+20241109 Changed: Parameters are read with tem::yaml::Reader (tem_yaml.h) instead of ProcessXML, because the
+         parameter files are YAML.
+20241109 Updated: Nitrogen fertilizer of cropland and pasture (xnfertflag) is passed to the soil nitrogen
+         budget.
+20241109 Fixed: Numbers are parsed strictly: a missing key or a value that is not a number stops the run, with
+         the file and key named (atoi and atof read such values as 0).
+20241110 Changed: Yearly and per-step arrays are std::vector sized at run time (CYCLE, NYEARS, NCOHORTS);
+         MAXCYCLE, MAXRTIME and MAXCHRTS removed.
 
 ****************************************************************
 ************************************************************* */
@@ -28,20 +20,23 @@ HUMNACT_GDS.H - describes human disturbances to natural ecosystems
 #define HUMNACT45_GDS_H
 
 #include "temconsts_gds.hpp"
-#include "tprocessXML_gds.h"
+#include "tem_yaml.h"
 #include "bioms_gds.hpp"  // Humnact45 uses Biomass class
 #include "tveg_gds.h"     // Humanact45 uses Tveg45 class
 
-#include<iostream>
-
-  using std::cin;
-
-class Humnact45 : public ProcessXML45
+class Humnact45
 {
 
   public:
 
      Humnact45();
+
+     // sizes the arrays of the steps of the year once CYCLE is known
+     // fraction of the cell in broadleaf forest and in natural cover of each year of the run (fire ignitions)
+     std::vector<double> forarea = std::vector<double>( 1, 0.0 );
+     std::vector<double> lwft = std::vector<double>( 1, 1.0 );
+
+     void allocate( void ) { initPROD1.assign( CYCLE, Biomass() ); forarea.assign( NYEARS, 0.0 ); lwft.assign( NYEARS, 1.0 ); }
 
 /* **************************************************************
 		 Public Functions
@@ -93,7 +88,7 @@ class Humnact45 : public ProcessXML45
 
      void resetYrFluxes( void );
 
-     void setAgricFlags( ofstream& rflog1 );
+     void setAgricFlags( std::ostream& rflog1 );
 
      void setNoCrops( const int& pdm );
 
@@ -322,6 +317,12 @@ class Humnact45 : public ProcessXML45
     {
       fertnpasture = pfertnpasture;
     }
+
+
+//     inline void setFERTN( const double& pfertn )
+//     {
+//       fertn = pfertn;
+//     }
 
 //     FIRENDEP **************************************************
 
@@ -1389,6 +1390,12 @@ class Humnact45 : public ProcessXML45
     // Flag indicating a disturbance occurrence
     int distflag;
 
+     // Flag to indicate start of optimum fertilization of
+     //   croplands after 1950 (and irrigation)
+    int fert1950flag;
+
+    int irrg1950flag;
+
      // Flag to indicate whether or not optimum
      //   fertilization of croplands occurs
     int fertflag;
@@ -1397,6 +1404,8 @@ class Humnact45 : public ProcessXML45
     double fertncrop;
     double fertnpasture;
     double fertn;
+
+
     // Flag to indicate whether or not optimum irrigation of
     //   croplands occur
     int irrgflag;
@@ -1601,7 +1610,8 @@ class Humnact45 : public ProcessXML45
 
     double immbadd;
 
-    Biomass initPROD1[CYCLE];
+    std::vector<Biomass> initPROD1 = std::vector<Biomass>( 12 );
+
 
     Biomass initPROD10[10];
 
@@ -1694,6 +1704,7 @@ class Humnact45 : public ProcessXML45
     // Stock of standing dead added to slash and volatilized resulting from storms
     Biomass standdead;
     Biomass vola;
+
     
     // Crop-specific "killing temperature" below which frost damage occurs
     double tkill[MAXCMNT];

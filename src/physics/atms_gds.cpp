@@ -4,15 +4,15 @@
 ATMS_GDS.CPP - object describes physical characteristics of the
 	         atmosphere
 
-Modifications:
-
-20060126 - DWK created by modifying atms50b5.cpp
-20060126 - DWK changed include from atms50b5.h to atms437.h
-20060126 - DWK changed Atmosphere50:: to class Atmsflux::
-20070105 - TWC changed Atmsflux:: to class Atms45
-2007 - TWC/BSF: Summary
-  using std:sin
-  Add three new function: daylength
+Version: XTEM version 4.5
+20241110 Changed: version number 4.5 (only the input and output, configuration and time handling changed).
+20241109 Changed: The days of a step come from Timestep (ttimestep.h) and arrays are sized MAXCYCLE, so the
+         step is set by run_dt and run_dt_units and is not fixed at twelve months.
+20241109 Fixed: daylength took the first day of a step from a 12-entry month table, which read past the table
+         for daily steps (uninitialised values, results that changed from run to run); it sums the days of the
+         steps before it.
+20241110 Changed: Yearly and per-step arrays are std::vector sized at run time (CYCLE, NYEARS, NCOHORTS);
+         MAXCYCLE, MAXRTIME and MAXCHRTS removed.
 
 ****************************************************************
 ************************************************************* */
@@ -37,24 +37,14 @@ Modifications:
 /* *************************************************************
 ************************************************************* */
 
+#include "ttimestep.h"
 #include "atms_gds.h"
 
 Atms45::Atms45()
 {
   // Number of days per month
 
-  ndays[0] = 31;
-  ndays[1] = 28;
-  ndays[2] = 31;
-  ndays[3] = 30;
-  ndays[4] = 31;
-  ndays[5] = 30;
-  ndays[6] = 31;
-  ndays[7] = 31;
-  ndays[8] = 30;
-  ndays[9] = 31;
-  ndays[10] = 30;
-  ndays[11] = 31;
+  setNDAYS();
 
 };
 
@@ -64,9 +54,8 @@ Atms45::Atms45()
 double Atms45::daylength( const float& lat, const int& dm )
 {
 
-//  double yd[CYCLE],ampl;
+//  double yd[MAXCYCLE],ampl;
   double decldeg, sunrise_angle, sumdayl, sumdaymonth;
-  int ymd[CYCLE];
   int initday, mday, jday;
   
   double pi = 3.14159265359;
@@ -89,20 +78,9 @@ double Atms45::daylength( const float& lat, const int& dm )
   //old formula from Running & Coughlan 1988, technically incorrect
 */ 
   
-  ymd[0] = 0;
-  ymd[1] = 31;
-  ymd[2] = 59;
-  ymd[3] = 90;
-  ymd[4] = 120;
-  ymd[5] = 151;
-  ymd[6] = 181;
-  ymd[7] = 212;
-  ymd[8] = 243;
-  ymd[9] = 273;
-  ymd[10] = 304;
-  ymd[11] = 334;
-  
-  initday = ymd[dm];
+  // First day of the step: the days of the steps before it (the month table for monthly steps, dm for daily).
+  initday = 0;
+  for( int i = 0; i < dm; ++i ) { initday += ndays[i]; }
   sumdayl = ZERO;
   sumdaymonth = ZERO;
 
@@ -251,3 +229,10 @@ void Atms45::resetYrFluxes( void )
 };
 
 
+
+
+void Atms45::setNDAYS( void )
+{
+  ndays.assign( CYCLE, 0 );
+  for( int i = 0; i < CYCLE; ++i ) { ndays[i] = getTimestep45().getDAYS( i ); }
+};

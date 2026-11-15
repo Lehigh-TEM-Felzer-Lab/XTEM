@@ -1,0 +1,41 @@
+# Carries the science changes of GDSTEM into src/ on the 1st of every month, or on demand (Actions, sync-gdstem, Run workflow).
+# GDSTEM is only read. .github/scripts/sync_gdstem.py diffs GDSTEM since the commit in .github/gdstem_sync.yaml, applies each file's diff to
+# the file of the same name in src/, and lists everything else in the pull request. A pull request is a draft when some diff
+# did not apply (it is saved under sync/rejected/ and ci.yml fails until it is resolved and deleted).
+# SYNC_TOKEN: a personal access token or GitHub App token with contents and pull-requests write access.
+# The default GITHUB_TOKEN would open the pull request but its pushes do not start ci.yml.
+name: sync-gdstem
+on:
+  schedule:
+    - cron: "17 6 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.SYNC_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.SYNC_TOKEN }}
+      - run: pip install pyyaml
+      - name: Sync
+        run: |
+          git config user.name xtem-sync
+          git config user.email xtem-sync@users.noreply.github.com
+          git remote add gdstem "$(python3 -c "import yaml;print(yaml.safe_load(open('.github/gdstem_sync.yaml'))['upstream'])")"
+          git fetch --no-tags -q gdstem main
+          rc=0; python3 .github/scripts/sync_gdstem.py --report report.md || rc=$?
+          [ "$rc" = 0 ] || [ "$rc" = 2 ] || exit "$rc"
+          git diff --cached --quiet && { echo "nothing to sync"; exit 0; }
+          sha=$(git rev-parse --short gdstem/main)
+          git switch -c "sync/gdstem-$sha"
+          git commit -q -m "Sync science from GDSTEM $sha"
+          git push -u origin HEAD
+          draft=""; [ "$rc" = 2 ] && draft="--draft"
+          gh pr create $draft --label science-sync --title "Sync science from GDSTEM $sha" --body-file report.md

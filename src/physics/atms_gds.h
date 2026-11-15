@@ -3,22 +3,12 @@
 ATMS45_GDS.H - object describes physical characteristics of the
 	       atmosphere
 
-Modifications:
-
-20060126 - DWK created by modifying atms50b5.h
-20060126 - DWK changed temconsts51.hpp to temconsts43.hpp
-20060126 - DWK changed class Atmosphere50 to class Atmsflux
-20060126 - DWK added public inline double getAOT40()
-20060126 - DWK added private double aot40
-20070105 - TWC changed class Atmsflux to class Atms45
-2007 - TWC/BSF Summary:
-   Public Functions: daylength
-     get/set: DAYL,
-	          PREVPAR, PRVPME, TRANGE, VPD
-   Private Variables: aot40b, dayl, inter, prevpar,
-                      prvpme, trange, vpd
-
-
+Version: XTEM version 4.5
+20241110 Changed: version number 4.5 (only the input and output, configuration and time handling changed).
+20241109 Changed: The days of a step come from Timestep (ttimestep.h) and arrays are sized MAXCYCLE, so the
+         step is set by run_dt and run_dt_units and is not fixed at twelve months.
+20241110 Changed: Yearly and per-step arrays are std::vector sized at run time (CYCLE, NYEARS, NCOHORTS);
+         MAXCYCLE, MAXRTIME and MAXCHRTS removed.
 
 *****************************************************************
 ************************************************************** */
@@ -35,6 +25,10 @@ class Atms45
 {
 
   public:
+
+     // Days of each step of the year; call after the run step is set
+     void setNDAYS( void );
+
 
      Atms45();
 
@@ -367,7 +361,7 @@ class Atms45
 ************************************************************** */
 
      // Number of days per month
-     int ndays[CYCLE];
+     std::vector<int> ndays = std::vector<int>( 12 );
 
      // Annual potential evapotranspiration (mm / year)
      double yrpet;

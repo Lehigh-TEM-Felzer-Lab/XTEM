@@ -1,176 +1,22 @@
-/* *************************************************************
-TMAXCOHORTDAT_gds.CPP - object to read and write the structure
-                          of maximum number of cohort grid cell
-                          data from/to files used by the
-                          Terrestrial Ecosystem Model
-
-Modifications:
-
-20060114 - DWK created by modifying tcohortdat433.cpp
-20060114 - DWK changed Cohortdata43:: to MaxCohortdata43::
-20060114 - DWK added int year to functions
-20060114 - DWK added int natchrts to functions
-20060114 - DWK addedin include tmaxcohortdat437.h and standard
-           includes
-20070105 - TWC changed name to tmaxcohortdat45
-
-****************************************************************
-************************************************************* */
-
-#include<cstdio>
-
-  using std::fscanf;
-  using std::FILE;
-
-#include<iostream>
-
-  using std::ios;
-  using std::endl;
-  using std::cout;
-
-#include<fstream>
-
-  using std::ifstream;
-  using std::ofstream;
-
-#include<iomanip>
-
-  using std::setprecision;
-
-#include<string>
-
-  using std::string;
+// tmaxcohortdat_gds.cpp
+// Version: XTEM version 4.5
+// 20241110 Changed: version number 4.5 (only the input and output, configuration and time handling changed).
+// 20241110 Changed: col and row renamed lon and lat.
+// 20241109 Changed: The record is read from a NetCDF stream (read) instead of a text file; the text readers
+//          and writers (get, getdel, out, outdel) are removed.
 
 #include "tmaxcohortdat_gds.h"
+#include "tem_netcdf_io.h"
 
-/* *************************************************************
-************************************************************* */
-
-MaxCohortdat45::MaxCohortdat45( void )
+int MaxCohortdat45::read( tem::nc::Stream* infile )
 {
-
-  chrtend = 1;
-  lagpos = -99;
-  curpos = 0;
-
-};
-
-/* *************************************************************
-************************************************************* */
-
-int MaxCohortdat45::get( ifstream& infile )
-{
-
-  lagpos = infile.tellg();
-
-  infile >> col;
-  infile >> row;
-  infile >> varname;
-  infile >> carea;
-  infile >> year;
-  infile >> total;
-  infile >> contnent;
-
-  infile.seekg( 0, ios::cur );
-
-  curpos = infile.tellg();
-
-  if( curpos < (lagpos + 10) ) { chrtend = -1; }
-
+  tem::nc::Record r;
+  const int chrtend = tem::nc::next( infile, r );
+  if( 1 == chrtend )
+  {
+    lon = r.lon; lat = r.lat; varname = r.varname; carea = r.area; year = r.year;
+    total = (int) r.v[0]; natchrts = (int) ( r.v.size() > 1 ? r.v[1] : r.v[0] );
+    contnent = r.region;
+  }
   return chrtend;
-
-};
-
-/* *************************************************************
-************************************************************* */
-
-
-/* *************************************************************
-************************************************************* */
-
-int MaxCohortdat45::getdel( FILE* infile )
-{
-  char tmpvarname[40];
-  char tmpcontnent[40];
-
-  chrtend = fscanf( infile,"%f,%f, %s ,%f,%d,%d, %s",
-                   &col,
-                   &row,
-                   tmpvarname,
-                   &carea,
-                   &year,
-                   &total,
-                   tmpcontnent );
-
-  varname = tmpvarname;
-  contnent = tmpcontnent;
-
-//  cout << "mxchrt = " << total << endl;
-  return chrtend;
-
-};
-
-/* *************************************************************
-************************************************************* */
-
-
-/* *************************************************************
-************************************************************* */
-
-void MaxCohortdat45::out( ofstream& ofile,
-                           const float& col,
-                           const float& row,
-                           const string& varname,
-                           const float& carea,
-                           const int& year,
-                           const int& total,
-                           const string& contnent )
-{
-
-  ofile.setf( ios::fixed,ios::floatfield );
-  ofile.setf( ios::showpoint );
-  ofile.precision( 1 );
-
-  ofile << col << ' ';
-  ofile << row << ' ';
-  ofile << varname << ' ';
-  ofile << setprecision( 0 ) << carea << ' ';
-  ofile << setprecision( 0 ) << year << ' ';
-  ofile << setprecision( 0 ) << total << ' ';
-  ofile << contnent;
-  ofile << endl;
-
-};
-
-/* *************************************************************
-************************************************************* */
-
-
-/* *************************************************************
-************************************************************* */
-
-void MaxCohortdat45::outdel( ofstream& ofile,
-                              const float& col,
-                              const float& row,
-                              const string& varname,
-                              const float& carea,
-                              const int& year,
-                              const int& total,
-                              const string& contnent )
-{
-
-  ofile.setf( ios::fixed,ios::floatfield );
-  ofile.setf( ios::showpoint );
-  ofile.precision( 1 );
-
-  ofile << col << ",";
-  ofile << row << ", ";
-  ofile << varname << " ,";
-  ofile << setprecision( 0 ) << carea << ",";
-  ofile << setprecision( 0 ) << year << ",";
-  ofile << setprecision( 0 ) << total << ",";
-  ofile << contnent;
-  ofile << endl;
-
-};
-
+}

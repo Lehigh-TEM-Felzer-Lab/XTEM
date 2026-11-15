@@ -1,191 +1,22 @@
-/* *************************************************************
-TSOLDAT_GDS.CPP - object to read and write the structure of soil
-                    texture data from/to files used by the
-                    the Terrestrial Ecosystem Model (TEM)
-
-Modifications:
-
-20060114 - DWK created by modifying tsoldat425.cpp
-20060114 - DWK added include tsoldat437.h and standard includes
-20060114 - DWK changed Soildata:: to Soildata43::
-20070105 - TWC changed name to tsoildat45
-
-****************************************************************
-************************************************************* */
-
-#include<cstdio>
-
-  using std::fscanf;
-  using std::FILE;
-
-#include<iostream>
-
-  using std::ios;
-  using std::endl;
-
-#include<fstream>
-
-  using std::ifstream;
-  using std::ofstream;
-
-#include<iomanip>
-
-  using std::setprecision;
-
-#include<string>
-
-  using std::string;
-
+// tsoldat_gds.cpp
+// Version: XTEM version 4.5
+// 20241110 Changed: version number 4.5 (only the input and output, configuration and time handling changed).
+// 20241110 Changed: col and row renamed lon and lat.
+// 20241109 Changed: The record is read from a NetCDF stream (read) instead of a text file; the text readers
+//          and writers (get, getdel, out, outdel) are removed.
 
 #include "tsoldat_gds.h"
+#include "tem_netcdf_io.h"
 
-
-
-Soildat45::Soildat45( void )
+int Soildat45::read( tem::nc::Stream* infile )
 {
-
-  soilend = 1;
-  lagpos = -99;
-  curpos = 0;
-
-};
-
-/* *************************************************************
-************************************************************* */
-
-int Soildat45::get( ifstream& infile )
-{
-
-  lagpos = infile.tellg();
-
-  infile >> col;
-  infile >> row;
-  infile >> varname;
-  infile >> carea;
-  infile >> pctsand;
-  infile >> pctsilt;
-  infile >> pctclay;
-  infile >> wsoil;
-  infile  >> source;
-  infile >> contnent;
-
-  infile.seekg( 0, ios::cur );
-
-  curpos = infile.tellg();
-
-  if( curpos < (lagpos + 10) ) { soilend = -1; }
-
+  tem::nc::Record r;
+  const int soilend = tem::nc::next( infile, r );
+  if( 1 == soilend )
+  {
+    lon = r.lon; lat = r.lat; varname = r.varname; carea = r.area;
+    pctsand = r.v[0]; pctsilt = r.v[1]; pctclay = r.v[2]; wsoil = 0;
+    source = "NC"; contnent = r.region;
+  }
   return soilend;
-
-};
-
-/* *************************************************************
-************************************************************* */
-
-
-/* *************************************************************
-************************************************************* */
-
-int Soildat45::getdel( FILE* infile )
-{
-  char tmpvarname[80];
-  char tmpsource[80];
-  char tmpcontnent[80];
-
-  soilend = fscanf( infile,
-                    "%f,%f, %s ,%f,%lf,%lf,%lf,%d, %s , %s ",
-                    &col,
-                    &row,
-                    tmpvarname,
-                    &carea,
-                    &pctsand,
-                    &pctsilt,
-                    &pctclay,
-                    &wsoil,
-                    tmpsource,
-                    tmpcontnent );
-
-  varname = tmpvarname;
-  source = tmpsource;
-  contnent = tmpcontnent;
-
-  return soilend;
-
-};
-
-/* *************************************************************
-************************************************************* */
-
-
-/* *************************************************************
-************************************************************* */
-
-void Soildat45::out( ofstream& ofile,
-                      const float& col,
-                      const float& row,
-                      const string& varname,
-                      const float& carea,
-                      const double& pctsand,
-                      const double& pctsilt,
-                      const double& pctclay,
-                      const int& wsoil,
-                      const string& source,
-                      const string& contnent )
-{
-
-   ofile.setf( ios::fixed,ios::floatfield );
-   ofile.setf( ios::showpoint );
-   ofile.precision( 1 );
-
-  ofile << col << ' ';
-  ofile << row << ' ';
-  ofile << varname << ' ';
-  ofile << setprecision( 2 ) << carea << ' ';
-  ofile << setprecision( 2 ) << pctsand << ' ';
-  ofile << pctsilt << ' ';
-  ofile << pctclay << ' ';
-  ofile << setprecision( 0 ) << wsoil << ' ';
-  ofile << source << ' ';
-  ofile << contnent;
-  ofile << endl;
-
-};
-
-/* *************************************************************
-************************************************************* */
-
-
-/* *************************************************************
-************************************************************* */
-
-void Soildat45::outdel( ofstream& ofile,
-                         const float& col,
-                         const float& row,
-                         const string& varname,
-                         const float& carea,
-                         const double& pctsand,
-                         const double& pctsilt,
-                         const double& pctclay,
-                         const int& wsoil,
-                         const string& source,
-                         const string& contnent )
-{
-
-   ofile.setf( ios::fixed,ios::floatfield );
-   ofile.setf( ios::showpoint );
-   ofile.precision( 1 );
-
-  ofile << col << ",";
-  ofile << row << ", ";
-  ofile << varname << " ,";
-  ofile << setprecision( 2 ) << carea << ",";
-  ofile << setprecision( 2 ) << pctsand << ",";
-  ofile << pctsilt << ",";
-  ofile << pctclay << ",";
-  ofile << setprecision( 0 ) << wsoil << ", ";
-  ofile << source << " , ";
-  ofile << contnent;
-  ofile << endl;
-
-};
-
+}

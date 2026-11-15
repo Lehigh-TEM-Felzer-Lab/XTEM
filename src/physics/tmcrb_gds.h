@@ -3,25 +3,14 @@
 TMCRB_GDS.H - object describing characteristics of soil microbes
 	        used in the Terrestrial Ecosystem Model (TEM)
 
-Modifications:
-
-20060126 - DWK created by modifying tmcrb50b5.h
-20060126 - DWK changed include from tprocessXML51.h
-           to tprocessXML437.h
-20060126 - DWK changed class Tmicrobe50 to class Tmicrobeflux
-20060126 - DWK changed inheritance from ProcessXML50 to
-           ProcessXML43
-20060126 - DWK changed include from temconsts51.hpp to
-           temconsts43.hpp
-20060126 - DWK deleted const double& tsoil and
-           const int& tsoilflg from function call to setDQ10()
-20070105 - TWC changed name to tmcrb45
-2007 - TWC/BSF
-   New function setDQ10LaRS (remove setNEWDQ10)
-   Public Functions and Private Parameters: remove alpha, beta,
-        gamma, qref, tref
-   Private Parameters: add rhalpha, rhbeta, rhgamma, rhqref,
-        rhtref
+Version: XTEM version 4.5
+20241110 Changed: version number 4.5 (only the input and output, configuration and time handling changed).
+20241109 Changed: Parameters are read with tem::yaml::Reader (tem_yaml.h) instead of ProcessXML, because the
+         parameter files are YAML.
+20241109 Updated: The moisture function of heterotrophic respiration is chosen at run time (rhmoist_method).
+20241109 Fixed: Numbers are parsed strictly: a missing key or a value that is not a number stops the run, with
+         the file and key named (atoi and atof read such values as 0).
+20241109 Changed: Includes ttimestep.h for rateToStep.
 
 *****************************************************************
 ************************************************************** */
@@ -32,11 +21,12 @@ Modifications:
 
 // Tmcrb45 uses the global constants NUMMSAC and MAXCMNT
 #include "temconsts_gds.hpp"
+#include "ttimestep.h"
 
-#include "tprocessXML_gds.h"
+#include "tem_yaml.h"
 #include "bioms_gds.hpp"
 
-class Tmcrb45: public ProcessXML45
+class Tmcrb45
 {
 
    public:
@@ -359,6 +349,9 @@ class Tmcrb45: public ProcessXML45
      double docproc;
 
 
+     // soil moisture response of heterotrophic respiration: 1 wfps, 2 dndc, 3 sech
+     int rhmoistmethod;
+
    private:
 
 /* **************************************************************
@@ -389,6 +382,7 @@ class Tmcrb45: public ProcessXML45
 
      // Effect of temperature on decomposition
      double dq10;
+
 
      // Net nitrogen mineralization
      double netnmin; // (g N / (sq. meter * month))

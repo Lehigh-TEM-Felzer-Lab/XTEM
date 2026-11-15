@@ -3,29 +3,17 @@
 TSOIL_GDS.H - object describing characteristics of soil used by
 	        the Terrestrial Ecosystem Model (TEM)
 
-Modifications:
+Version: XTEM version 4.5
+20241110 Changed: version number 4.5 (only the input and output, configuration and time handling changed).
+20241109 Changed: Parameters are read with tem::yaml::Reader (tem_yaml.h) instead of ProcessXML, because the
+         parameter files are YAML.
+20241109 Changed: The days of a step come from Timestep (ttimestep.h) and arrays are sized MAXCYCLE, so the
+         step is set by run_dt and run_dt_units and is not fixed at twelve months.
+20241109 Fixed: Numbers are parsed strictly: a missing key or a value that is not a number stops the run, with
+         the file and key named (atoi and atof read such values as 0).
+20241110 Changed: Yearly and per-step arrays are std::vector sized at run time (CYCLE, NYEARS, NCOHORTS);
+         MAXCYCLE, MAXRTIME and MAXCHRTS removed.
 
-20060126 - DWK created by modifying tsoil50b5.h
-20060126 - DWK changed include from temconts51.hpp to
-           temconsts43.hpp
-20060126 - DWK changed include from tprocessXML51.h to
-           tprocessXML437.h
-20060126 - DWK deleted include qsoiltemp50b5.h
-20060126 - DWK changed class Tsoil50 to class Tsoilflux
-20060126 - DWK changed inheritance from ProcessXML50 to
-           ProcessXML43
-20060126 - DWK deleted public function double
-           updateActiveLayerRootZ(), inline double
-           getACTLAYER(), inline double getDST10(), inline
-           double getNEXTDST10(), inline double getPREVDST10()
-           and inline double getTSOIL()
-20060126 - DWK deleted  public Soilthermal50 stm, int stmflg,
-           double yrdst10 and double yrtsoil
-20060126 - DWK deleted private double activeLayer, double dst10,
-           double nextdst10, double prevdst10 and double tsoil
-20060129 - DWK added public inline getVSM() and setVSM()
-20060320 - DWK added private double surfrun and double drainage
-20070105 - TWC changed name to tsoil45
 2007:  TWC/BSF
      setSWP public function
 	 get/set: evap
@@ -41,15 +29,19 @@ Modifications:
 // Tsoil45 uses the global constant MAXCMNT
 #include "temconsts_gds.hpp"
 
-#include "tprocessXML_gds.h"
+#include "tem_yaml.h"
 
 #include "bioms_gds.hpp"      // Tsoilflux uses Biomass class
 
 
-class Tsoil45 : public ProcessXML45
+class Tsoil45
 {
 
   public:
+
+     // Days of each step of the year; call after the run step is set
+     void setNDAYS( void );
+
 
      Tsoil45( void );
 
@@ -760,7 +752,7 @@ class Tsoil45 : public ProcessXML45
      // Soil moisture (mm)
      double moist;
 
-     double ndays[CYCLE];
+     std::vector<double> ndays = std::vector<double>( 12 );
 
      // Total nitrogen input to soils
      double ninput;    // (g N / (sq. meter * month))

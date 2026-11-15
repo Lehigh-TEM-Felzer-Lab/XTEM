@@ -3,28 +3,18 @@
 TELM_GDS.H - Determines the interface among CLM, LCLUC and TEM
              modules
 
-Modifications:
-
-20060127 - DWK created by modifying telm50b5.h
-20060127 - DWK changed include from tclm50b5.h to tclm437.h
-20060127 - DWK changed include from telmntcohort50b5.hpp to
-           telmntcohort437.hpp
-20060127 - DWK changed include from tlcluc50b5.h to tlcluc437.h
-20060127 - DWK changed include from ttem50b5.h to ttem437.h
-20060127 - DWK changed include from tclmdat50b5.h to tclmdat437.h
-20060127 - DWK changed include from tsoldat50b5.h to tsoldat437.h
-20060127 - DWK changed include from telvdat50b5.h to telvdat437.h
-20060127 - DWK changed include from ttemdat50b5.h to ttemdat437.h
-20060127 - DWK changed Class TEMelmnt50 to Class TEMelmnt43
-20060127 - DWK changed public TEMclm50 clm to TEMclm43 clm
-20060127 - DWK changed public ElmntCohort50 cohort[MAXCHRTS] to
-           ElmntCohort43
-20060127 - DWK changed public TEMlcluc50 lcluc to
-           TEMlcluc43 lcluc
-20060127 - DWK changed public TTEM50 tem to TTEM43 tem
-20060127 - DWK added const double& aot40 to private function
-            int temgisqc()
-20070105 - TWC modified name to telm45
+Version: XTEM version 4.5
+20241110 Changed: version number 4.5 (only the input and output, configuration and time handling changed).
+20241110 Changed: col and row renamed lon and lat.
+20241109 Changed: Output goes to the NetCDF writer (tem::nc::outputPut) instead of one text file per variable,
+         so one file holds all variables.
+20241109 Changed: The cohort state is read and written through tem_state_io.h, one NetCDF state file for all
+         cells.
+20241109 Changed: Arrays are sized MAXCYCLE for the run step.
+20241109 Changed: The texture and elevation inputs are iftexture and ifelev (were fstxt and felev).
+20241110 Changed: Yearly and per-step arrays are std::vector sized at run time (CYCLE, NYEARS, NCOHORTS);
+         MAXCYCLE, MAXRTIME and MAXCHRTS removed.
+20241110 Changed: Absorbs telm45_competition.h; one cohort class for both orders.
 
 *****************************************************************
 ************************************************************** */
@@ -36,14 +26,12 @@ const int TQCZEROFLAG = 31;
 
 //Modules representing climate and TEM
 
-#include "tatmdep_gds.h"  // Tatmdep class
-#include "tnfert_gds.h"  // Tnfert class
+#include "tem_state_io.h"
 #include "tclm_gds.h"   // Telm45 uses the Tclm45 class
 
 // Telm45 uses the Elmntcohort45
 #include "telmntcohort_gds.hpp"
 
-#include "tdisturb_gds.h" // Telm45 uses the Tlcluc45 class
 #include "ttem_gds.h"   // Telm45 uses the Ttem45 class
 
 #include "tlcluc_gds.h" // Telm45 uses the Tlcluc45 class
@@ -54,7 +42,6 @@ const int TQCZEROFLAG = 31;
 #include "tclmdat_gds.h"  //Telm45 uses the Clmdat45 class
 #include "tsoldat_gds.h"  //Telm45 uses the Soildat45 class
 #include "telvdat_gds.h"  //Telm45 uses the Elevdat45 class
-#include "ttemdat_gds.h"  //Telm45 uses the Temdat45 class
 
 class Telm45
 {
@@ -63,45 +50,60 @@ class Telm45
 
      Telm45();
 
+     // sizes the arrays of steps, years and cohorts once CYCLE, NYEARS and NCOHORTS are known
+     void allocate( void )
+     {
+       atmstotyr.assign( NYEARS, 0 );
+       avetair.assign( NYEARS, 0.0 );
+       climate = vec3<double>( NUMATMS, CYCLE, NYEARS );
+       adep = vec2<double>( 1, NYEARS );
+       nfertcrop = vec2<double>( 1, NYEARS );
+       nfertpasture = vec2<double>( 1, NYEARS );
+       cohort.assign( NCOHORTS, ElmntCohort45() );
+       for( size_t i = 0; i < cohort.size(); ++i ) { cohort[i].initPROD1.assign( CYCLE, Biomass() ); }
+       mxtair.assign( NYEARS, 0.0 );
+       ttotyr.assign( NYEARS, 0 );
+       yrprec.assign( NYEARS, 0.0 );
+       vegceq.assign( NYEARS, 0.0 );
+       soilceq.assign( NYEARS, 0.0 );
+       vegneq.assign( NYEARS, 0.0 );
+       soilneq.assign( NYEARS, 0.0 );
+       output = vec3<double>( NCOHORTS, NUMTEM, CYCLE );
+       tem.allocate();
+     }
+
 
 /* *************************************************************
 		 Public Function Declarations
 ************************************************************* */
 
-     void atmswritemiss( ofstream fout[NUMATMS],
-                         const vector<string>& predname,
-                         const int& pdyr,
-                         const int& atmspred,
-                         const double value );
 
-     void atmswritepred( ofstream fout[NUMATMS],
-                         const int& pdyr,
+     void atmswritepred( const int& pdyr,
                          const vector<string>& predname,
                          const int& atmspred );
 
-     int coregerr( ofstream& rflog1,
+     int coregerr( std::ostream& rflog1,
                    const string& varname1,
-                   const float& col1,
-		           const float& row1,
+                   const float& lon1,
+		           const float& lat1,
                    const string& varname2,
-                   const float& col2,
-		           const float& row2 );
+                   const float& lon2,
+		           const float& lat2 );
 
      int equilibrateTEM( const double& ptol,
                         const int& pichrt,
-                        ofstream fout[NUMTEM],
                         const vector<string>& predname,
                         const int& spinoutfg,
                         int & year,
-                        ofstream& flog1 );  
+                        std::ostream& flog1 );  
 
      void getTEMCohortState( const int& pichrt );
 
      void initializeCohortTEMState( const int& pichrt );
 
-     void outputTEMmonth( const int& pdm );
+     void outputTEMmonth( const int& pdm, const int& ichrt );
 
-     void readCohortState( ifstream& ifstate,
+     void readCohortState( tem::state::In& ifstate,
                            const int& pichrt );
 
      void saveTEMCohortState( const int& pichrt );
@@ -109,16 +111,15 @@ class Telm45
      void setCohortTEMState( const ElmntCohort45& firstchrt,
                              ElmntCohort45& targetchrt );
 
-     int setGIStopography( ofstream& flog1,
+     int setGIStopography( std::ostream& flog1,
                            int& ftlerr,
-                           FILE* fstxt,
-                           FILE*felev );
+                           tem::nc::Stream* iftexture,
+                           tem::nc::Stream* ifelev );
 
-     void setTEMequilState( ofstream& rflog1,
+     void setTEMequilState( std::ostream& rflog1,
                             const int& equil,
                             const int& totsptime,
                             const int& pichrt,
-                            ofstream fout[NUMTEM],
                             const vector<string>& predname,
                             const int& spinoutfg
       );
@@ -128,8 +129,7 @@ class Telm45
                       const int& totsptime,
                       const int& pichrt );
 
-     void temwritepred( ofstream fout[NUMTEM],
-                        const vector<string>& predname,
+     void temwritepred( const vector<string>& predname,
                         const int& pdyr,
                         const int& pichrt,
                         const int& ntempred,
@@ -141,33 +141,33 @@ class Telm45
                           const int& outyr,
                           const int& pdm,
                           const int& pichrt,
-                          ofstream& flog1 );
+                          std::ostream& flog1 );
 
-     void writeCohortState( ofstream& ofstate,
+     void writeCohortState( tem::state::Out& ofstate,
                             const int& pichrt );
 
 /* *************************************************************
 		 Public Variables
 ************************************************************* */
 
-     int atmstotyr[MAXRTIME];
+     std::vector<int> atmstotyr = std::vector<int>( 1 );
 
      // Mean annual air temperature
-     double avetair[MAXRTIME];
+     std::vector<double> avetair = std::vector<double>( 1 );
 
 //     long carea;
      float carea;
 
-     double climate[NUMATMS][CYCLE][MAXRTIME];
-     double adep[1][MAXRTIME];
-     double nfertcrop[1][MAXRTIME];
-     double nfertpasture[1][MAXRTIME];
+     std::vector<std::vector<std::vector<double>>> climate = vec3<double>( NUMATMS, 12, 1 );
+     std::vector<std::vector<double>> adep = vec2<double>( 1, 1 );
+     std::vector<std::vector<double>> nfertcrop = vec2<double>( 1, 1 );
+     std::vector<std::vector<double>> nfertpasture = vec2<double>( 1, 1 );
 
      Tclm45 clm;
 
-     ElmntCohort45 cohort[MAXCHRTS];
+     std::vector<ElmntCohort45> cohort = std::vector<ElmntCohort45>( 1 );
 
-     float col;
+     float lon;
 
      string contnent;
      
@@ -177,26 +177,17 @@ class Telm45
 
      int fatalerr;
 
-     double lat;
-
-     Tdisturb disturb;
-
      Tlcluc45 lcluc;
 
-     Tatmdep atmdep;
 
-     Tnfert nfert;
 
-     double lon;
-
-     int lonlatflag;
 
      // Maximum number of cohorts in an element
      //   during the current year
      int maxcohorts;
 
      // Maximum monthly air temperature during the year
-     double mxtair[MAXRTIME];
+     std::vector<double> mxtair = std::vector<double>( 1 );
 
      // Maximum number of "natural" cohorts in an element
      int natcohorts;
@@ -209,7 +200,7 @@ class Telm45
 
 //     vector<string> predstr;
 
-     double output[NUMTEM][CYCLE];
+     std::vector<std::vector<std::vector<double>>> output = vec3<double>( 1, NUMTEM, 12 );
 
      int outyr;
 
@@ -219,7 +210,7 @@ class Telm45
 
      string region;
 
-     float row;
+     float lat;
 
 //     long subarea;
      float subarea;
@@ -228,21 +219,21 @@ class Telm45
 
      int totpred;
 
-     int ttotyr[MAXRTIME];
+     std::vector<int> ttotyr = std::vector<int>( 1 );
 
      int wrtyr;
 
      // Annual precipitation during the year
-     double yrprec[MAXRTIME];
+     std::vector<double> yrprec = std::vector<double>( 1 );
 
      int year;
 
-     double avlneq[MAXRTIME];
-     double vegceq[MAXRTIME];
-     double soilceq[MAXRTIME];
-     double vegneq[MAXRTIME];
-     double soilneq[MAXRTIME];
-     double smoisteq[MAXRTIME];
+     std::vector<double> avlneq = std::vector<double>( 1 );
+     std::vector<double> vegceq = std::vector<double>( 1 );
+     std::vector<double> soilceq = std::vector<double>( 1 );
+     std::vector<double> vegneq = std::vector<double>( 1 );
+     std::vector<double> soilneq = std::vector<double>( 1 );
+     std::vector<double> smoisteq = std::vector<double>( 1 );
 
 
 /* *************************************************************
@@ -274,7 +265,7 @@ class Telm45
 
      int transqc( int& maxyears,
                   int& totyr,
-                  double plantc[CYCLE] );
+                  double* plantc );
 
 };
 

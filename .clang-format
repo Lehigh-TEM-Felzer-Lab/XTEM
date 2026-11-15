@@ -1,0 +1,16 @@
+# Layout of the original TEM sources (Allman braces, two-space indent, spaces inside parentheses).
+# Apply to new files only: clang-format -i <file>. Do not reformat the inherited physics.
+BasedOnStyle: LLVM
+IndentWidth: 2
+ColumnLimit: 100
+BreakBeforeBraces: Allman
+SpacesInParentheses: true
+SpaceBeforeParens: Never
+SpaceAfterCStyleCast: true
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortFunctionsOnASingleLine: None
+AllowShortBlocksOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+NamespaceIndentation: None
+PointerAlignment: Left
+SortIncludes: false

@@ -1,18 +1,20 @@
 /* *************************************************************
-TNFERTDAT_GDS.H - object to read and write the structure of land
-                  use / land cover cohort data from/to files
+NFERTDAT.H - object to read the annual nitrogen fertilizer rate
+             of a grid cell (crop or pasture) from NetCDF
 
-20060422 - DWK created by modifying lulcdat437.h
-20060422 - DWK changed class Lulcdata43 to class Lulcdata44
-20060422 - DWK deleted public double RAP
-20060422 - DWK added public int disturbflag and public int
-           disturbmonth
-20070105 - TWC changed name to lulcdat45
+Version: XTEM version 4.5
+20241110 Changed: version number 4.5 (only the input and output, configuration and time handling changed).
+20241110 Changed: col and row renamed lon and lat.
+20241109 Updated: Reads the annual nitrogen fertilizer rate of a cell (crop or pasture) from NetCDF.
 
 ************************************************************* */
 
-#ifndef TNFERTDAT_GDS_H
-#define TNFERTDAT_GDS_H
+#ifndef NFERTDAT_H
+#define NFERTDAT_H
+
+#include <cstdio>
+
+namespace tem::nc { class Stream; }
 
 class Nfertdat
 {
@@ -22,41 +24,28 @@ class Nfertdat
      Nfertdat( void );
 
 /* *************************************************************
-                      Public Functions
+		 Public Functions
 ************************************************************* */
 
-// read data structure.
-     int getdel( FILE* infile );
+     // read data structure; returns -1 at the end of the data
 
+     int read( tem::nc::Stream* infile );
 
 /* *************************************************************
-                     Public Variables
+		 Public Variables
 ************************************************************* */
 
-     // column or longitude of grid cell (degrees)
-     float col;
+     // longitude of grid cell (degrees)
+     float lon;
 
-     // row or latitude of grid cell (degrees)
-     float row;
+     // latitude of grid cell (degrees)
+     float lat;
 
      // year
      int year;
 
-     // ndep value
+     // fertilizer rate
      float nfertval;
-
-
-  private:
-
-/* *************************************************************
-                      Private Variables
-************************************************************* */
-
-     int nfertend;
-     long curpos;
-     long lagpos;
-
 };
 
 #endif
-

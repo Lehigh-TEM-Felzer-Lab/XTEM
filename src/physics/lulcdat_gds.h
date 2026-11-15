@@ -2,68 +2,33 @@
 LULCDAT_GDS.H - object to read and write the structure of land
                   use / land cover cohort data from/to files
 
-20060422 - DWK created by modifying lulcdat437.h
-20060422 - DWK changed class Lulcdata43 to class Lulcdata44
-20060422 - DWK deleted public double RAP
-20060422 - DWK added public int disturbflag and public int
-           disturbmonth
-20070105 - TWC changed name to lulcdat45
+Version: XTEM version 4.5
+20241110 Changed: version number 4.5 (only the input and output, configuration and time handling changed).
+20241110 Changed: col and row renamed lon and lat.
+20241109 Changed: The record is read from a NetCDF stream (read) instead of a text file; the text readers and
+         writers (get, getdel, out, outdel) are removed.
 
 ************************************************************* */
 
 #ifndef LULCDAT_GDS_H
 #define LULCDAT_GDS_H
 
+#include <string>
+
+namespace tem::nc { class Stream; }
+
 class Lulcdat45
 {
 
   public:
 
-     Lulcdat45( void );
 
 /* *************************************************************
                       Public Functions
 ************************************************************* */
 
 // read data structure.
-     int get( ifstream& infile );
-     int getdel( FILE* infile );
-
-//write data structure.
-     void out( ofstream& ofile,
-               const float& col,
-               const float& row,
-               const string& varname,
-               const int& year,
-               const int& icohort,
-               const int& isrccohort,
-               const int& standage,
-               const float& chrtarea,
-               const int& potveg,
-               const int& currentveg,
-               const int& subtype,
-               const int& agstate,
-               const int& agprevstate,
-               const int& disturbflag,
-               const string& region );
-
-     void outdel( ofstream& ofile,
-                  const float& col,
-                  const float& row,
-                  const string& varname,
-                  const int& year,
-                  const int& icohort,
-                  const int& isrccohort,
-                  const int& standage,
-                  const float& chrtarea,
-                  const int& potveg,
-                  const int& currentveg,
-                  const int& subtype,
-                  const int& agstate,
-                  const int& agprevstate,
-                  const int& disturbflag,
-                  const string& region );
-
+     int read( tem::nc::Stream* infile );
 
 /* *************************************************************
                      Public Variables
@@ -83,8 +48,8 @@ class Lulcdat45
      // area of a cohort within a grid cell
      float chrtarea;
 
-     // column or longitude of grid cell (degrees)
-     float col;
+     // longitude of grid cell (degrees)
+     float lon;
 
      // Index of current vegetation type
      int currentveg;
@@ -131,10 +96,10 @@ class Lulcdat45
      double prod100par;
 
      // name of region containing cohort
-     string region;
+     std::string region;
 
-     // row or latitude of grid cell (degrees)
-     float row;
+     // latitude of grid cell (degrees)
+     float lat;
 
      // Proportion of soil organic carbon lost
      // during a disturbance
@@ -151,7 +116,7 @@ class Lulcdat45
      int tillflag;
 
      // varname = "AGRICUL" for this data set
-     string varname;
+     std::string varname;
 
      // Proportion of vegetation carbon lost
      // during a disturbance
@@ -159,18 +124,6 @@ class Lulcdat45
 
      // Year data represents
      int year;
-
-
-  private:
-
-/* *************************************************************
-                      Private Variables
-************************************************************* */
-
-     int lulcend;
-     long curpos;
-     long lagpos;
-
 };
 
 #endif

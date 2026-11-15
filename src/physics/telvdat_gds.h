@@ -3,12 +3,11 @@ TELVDAT_GDS.H - object to read and write the structure of
                  elevation data from/to files used by the Water
                  Balance Model
 
-Modifications:
-
-20060114 - DWK created by modifying telvdat425.h
-20060114 - DWK changed class Elevdata to class Elevdata43
-20060114 - DWK deleted telvdat425.cpp from bottom of file
-20070105 - TWC changed name to telvdat45
+Version: XTEM version 4.5
+20241110 Changed: version number 4.5 (only the input and output, configuration and time handling changed).
+20241110 Changed: col and row renamed lon and lat.
+20241109 Changed: The record is read from a NetCDF stream (read) instead of a text file; the text readers and
+         writers (get, getdel, out, outdel) are removed.
 
 ****************************************************************
 ************************************************************* */
@@ -16,52 +15,36 @@ Modifications:
 #ifndef TELVDAT_GDS_H
 #define TELVDAT_GDS_H
 
+#include <string>
+
+namespace tem::nc { class Stream; }
+
 class Elevdat45
 {
 
   public:
 
-     Elevdat45( void );
 
 /* *************************************************************
                       Public Functions
 ************************************************************* */
 
      // read data structure.
-     int get( ifstream& infile );
 
-     int getdel( FILE* infile );
-
-     //write data structure.
-     void out( ofstream& ofile,
-               const float& col,
-               const float& row,
-               const string& varname,
-               const float& carea,
-               const double& elev,
-               const string& contnent );
-
-     void outdel( ofstream& ofile,
-                  const float& col,
-                  const float& row,
-                  const string& varname,
-                  const float& carea,
-                  const double& elev,
-                  const string& contnent );
-
+     int read( tem::nc::Stream* infile );
 
 /* *************************************************************
                      Public Variables
 ************************************************************* */
 
-     // column or longitude of grid cell (degrees)
-     float col;
+     // longitude of grid cell (degrees)
+     float lon;
 
-     // row or latitude of grid cell (degrees)
-     float row;
+     // latitude of grid cell (degrees)
+     float lat;
 
      // "ELEV"
-     string varname;
+     std::string varname;
 
      // area covered by grid cell (sq. km)
      float carea;
@@ -70,19 +53,7 @@ class Elevdat45
      double elev;
 
      // name of continent containing grid cell
-     string contnent;
-
-
-  private:
-
-/* *************************************************************
-                      Private Variables
-************************************************************* */
-
-     int elvend;
-     long curpos;
-     long lagpos;
-
+     std::string contnent;
 };
 
 #endif

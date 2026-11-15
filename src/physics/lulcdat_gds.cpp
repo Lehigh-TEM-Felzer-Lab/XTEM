@@ -1,247 +1,28 @@
-/* *************************************************************
-LULCDAT_GDS.CPP - object to read and write the structure of
-                   land use/land cover data from/to files
-
-Modifications:
-
-20060422 - DWK created by modifying lulcdat437.cpp
-20060422 - DWK changed include from lulcdat437.h to lulcdat44.h
-20060422 - DWK changed Lulcdata43:: to Lulcdata44::
-20060422 - DWK added int disturbflag and int disturbmonth to
-           functions
-20070105 - TWC renamed to lulcdat45
-
-************************************************************* */
-
-#include<cstdio>
-
-  using std::fscanf;
-  using std::FILE;
-
-#include<iostream>
-
-  using std::ios;
-  using std::endl;
-
-#include<fstream>
-
-  using std::ifstream;
-  using std::ofstream;
-
-#include<iomanip>
-
-  using std::setprecision;
-
-#include<string>
-
-  using std::string;
-
-#include<cstring>
-
-  using std::memcpy;
+// lulcdat_gds.cpp
+// Version: XTEM version 4.5
+// 20241110 Changed: version number 4.5 (only the input and output, configuration and time handling changed).
+// 20241110 Changed: col and row renamed lon and lat.
+// 20241109 Changed: The record is read from a NetCDF stream (read) instead of a text file; the text readers
+//          and writers (get, getdel, out, outdel) are removed.
 
 #include "lulcdat_gds.h"
+#include "tem_netcdf_io.h"
 
-
-Lulcdat45::Lulcdat45( void )
+int Lulcdat45::read( tem::nc::Stream* infile )
 {
-
-  lulcend = 1;
-  lagpos = -99;
-  curpos = 0;
-
-};
-
-/* **************************************************************
-                    Public Functions
-************************************************************** */
-
-/* *************************************************************
-************************************************************* */
-
-int Lulcdat45::get( ifstream& infile )
-{
-
-  lagpos = infile.tellg();
-
-  infile >> col;
-  infile >> row;
-  infile >> varname;
-  infile >> year;
-  infile >> icohort;
-  infile >> isrccohort;
-  infile >> standage;
-  infile >> chrtarea;
-  infile >> potveg;
-  infile >> currentveg;
-  infile >> subtype;
-  infile >> agstate;
-  infile >> agprevstate;
-  infile >> disturbflag;
-  infile >> region;
-
-  infile.seekg( 0, ios::cur );
-  curpos = infile.tellg();
-
-  if( curpos < (lagpos + 10) ) { lulcend = -1; }
-
+  tem::nc::Record r;
+  const int lulcend = tem::nc::next( infile, r );
+  if( 1 == lulcend )
+  {
+    lon = r.lon; lat = r.lat; varname = r.varname; year = r.year;
+    icohort = r.index; isrccohort = r.index;  // replaced below when the file gives the source cohort
+    standage = (int) r.v[0]; chrtarea = (float) r.v[1]; potveg = (int) r.v[2];
+    currentveg = (int) r.v[3]; subtype = (int) r.v[4]; agstate = (int) r.v[5];
+    agprevstate = (int) r.v[6]; disturbflag = (int) r.v[7];
+    if( r.v.size() > 8 && r.v[8] >= 1.0 ) { isrccohort = (int) r.v[8]; }  // 1-based index of the cohort a new cohort splits from
+    tillflag = 0; fertflag = 0; irrgflag = 0; disturbmonth = 0;
+    vconvert = 0.0; prod10par = 0.0; prod100par = 0.0; sconvert = 0.0;
+    region = r.region;
+  }
   return lulcend;
-
-};
-
-/* *************************************************************
-************************************************************* */
-
-
-/* *************************************************************
-************************************************************* */
-#define BUF_SIZE 100000
-#define MAX_LINE_LENGTH 200
-
-char buf[BUF_SIZE];
-size_t indexr = BUF_SIZE;
-size_t buf_end = BUF_SIZE;
-
-int Lulcdat45::getdel( FILE* infile )
-{
-  char tmpvarname[40];
-  char tmpregion[80];
-
-    size_t bytes_in_buffer = buf_end - indexr;
-    if (buf_end == BUF_SIZE && bytes_in_buffer < MAX_LINE_LENGTH) {
-        memcpy(buf, buf + indexr, bytes_in_buffer);
-        size_t bytes_read = fread(buf + bytes_in_buffer, 1, indexr, infile);
-        buf_end = bytes_in_buffer + bytes_read;
-        bytes_in_buffer = buf_end;
-        indexr = 0;
-    }
-    if (bytes_in_buffer < 10) {
-        return -1;
-    }
-
-lulcend = sscanf( buf + indexr,
-                    "%f,%f, %s ,%d,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d, %s",
-                    &col,
-                    &row,
-                    tmpvarname,
-                    &year,
-                    &icohort,
-                    &isrccohort,
-                    &standage,
-                    &chrtarea,
-                    &potveg,
-                    &currentveg,
-                    &subtype,
-                    &agstate,
-                    &agprevstate,
-                    &disturbflag,
-                    tmpregion );
-
-  varname = tmpvarname;
-  region = tmpregion;
-
-         while(indexr < BUF_SIZE) {
-            if (buf[indexr++] == '\n')
-         break;
-         }
-
-  return lulcend;
-
-};
-
-/* *************************************************************
-************************************************************* */
-
-
-/* *************************************************************
-************************************************************* */
-
-void Lulcdat45::out( ofstream& ofile,
-                      const float& col,
-                      const float& row,
-                      const string& varname,
-                      const int& year,
-                      const int& icohort,
-                      const int& isrccohort,
-                      const int& standage,
-                      const float& chrtarea,
-                      const int& potveg,
-                      const int& currentveg,
-                      const int& subtype,
-                      const int& agstate,
-                      const int& agprevstate,
-                      const int& disturbflag,
-                      const string& region )
-{
-
-  ofile.setf( ios::fixed,ios::floatfield );
-  ofile.setf( ios::showpoint );
-  ofile.precision( 1 );
-
-  ofile << col << ' ';
-  ofile << row << ' ';
-  ofile << varname << ' ';
-  ofile << year << ' ';
-  ofile << icohort << ' ';
-  ofile << isrccohort << ' ';
-  ofile << standage << ' ';
-  ofile << chrtarea << ' ';
-  ofile << potveg << ' ';
-  ofile << currentveg << ' ';
-  ofile << subtype << ' ';
-  ofile << agstate << ' ';
-  ofile << agprevstate << ' ';
-  ofile << disturbflag << ' ';
-  ofile << region;
-  ofile << endl;
-
-};
-
-/* *************************************************************
-************************************************************* */
-
-
-/* *************************************************************
-************************************************************* */
-
-void Lulcdat45::outdel( ofstream& ofile,
-                         const float& col,
-                         const float& row,
-                         const string& varname,
-                         const int& year,
-                         const int& icohort,
-                         const int& isrccohort,
-                         const int& standage,
-                         const float& chrtarea,
-                         const int& potveg,
-                         const int& currentveg,
-                         const int& subtype,
-                         const int& agstate,
-                         const int& agprevstate,
-                         const int& disturbflag,
-                         const string& region )
-{
-
-  ofile.setf( ios::fixed,ios::floatfield );
-  ofile.setf( ios::showpoint );
-  ofile.precision( 1 );
-
-  ofile << setprecision(4) << col << ",";
-  ofile << setprecision(4) << row << ", ";
-  ofile << varname << " ,";
-  ofile << year << ",";
-  ofile << icohort << ",";
-  ofile << isrccohort << ",";
-  ofile << standage << ",";
-  ofile << chrtarea << ",";
-  ofile << potveg << ",";
-  ofile << currentveg << ",";
-  ofile << subtype << ",";
-  ofile << agstate << ",";
-  ofile << agprevstate << ",";
-  ofile << disturbflag << ",";
-  ofile << region;
-  ofile << endl;
-
-};
-
+}

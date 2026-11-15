@@ -1,165 +1,21 @@
-/* *************************************************************
-TELVDAT_GDS.CPP - object to read and write the structure of
-                  elevation data from/to files used by the Water
-                  Balance Model
-
-Modifications:
-
-20060114 - DWK created by modifying telvdat425.cpp
-20060114 - DWK added include telvdat437.h and standard includes
-20060114 - DWK changed Elevdata:: to Elevdata43::
-20070105 - TWC changed name to telvdat45
-
-****************************************************************
-************************************************************* */
-
-#include<cstdio>
-
-  using std::fscanf;
-  using std::FILE;
-
-#include<iostream>
-
-  using std::ios;
-  using std::endl;
-
-#include<fstream>
-
-  using std::ifstream;
-  using std::ofstream;
-
-#include<iomanip>
-
-  using std::setprecision;
-
-#include<string>
-
-  using std::string;
-
+// telvdat_gds.cpp
+// Version: XTEM version 4.5
+// 20241110 Changed: version number 4.5 (only the input and output, configuration and time handling changed).
+// 20241110 Changed: col and row renamed lon and lat.
+// 20241109 Changed: The record is read from a NetCDF stream (read) instead of a text file; the text readers
+//          and writers (get, getdel, out, outdel) are removed.
 
 #include "telvdat_gds.h"
+#include "tem_netcdf_io.h"
 
-
-
-Elevdat45::Elevdat45( void )
+int Elevdat45::read( tem::nc::Stream* infile )
 {
-
-  elvend = 1;
-  lagpos = -99;
-  curpos = 0;
-
-};
-
-/* *************************************************************
-************************************************************* */
-
-int Elevdat45::get( ifstream& infile )
-{
-
-  lagpos = infile.tellg();
-
-  infile >> col;
-  infile >> row;
-  infile >> varname;
-  infile >> carea;
-  infile >> elev;
-  infile >> contnent;
-
-  infile.seekg( 0, ios::cur );
-
-  curpos = infile.tellg();
-
-  if( curpos < (lagpos + 10) ) { elvend = -1; }
-
+  tem::nc::Record r;
+  const int elvend = tem::nc::next( infile, r );
+  if( 1 == elvend )
+  {
+    lon = r.lon; lat = r.lat; varname = r.varname; carea = r.area; elev = r.v[0];
+    contnent = r.region;
+  }
   return elvend;
-
-};
-
-/* *************************************************************
-************************************************************* */
-
-
-/* *************************************************************
-************************************************************* */
-
-int Elevdat45::getdel( FILE* infile )
-{
-  char tmpvarname[80];
-  char tmpcontnent[80];
-
-  elvend = fscanf( infile,
-                   "%f,%f, %s ,%f,%lf, %s",
-                   &col,
-                   &row,
-                   tmpvarname,
-                   &carea,
-                   &elev,
-                   tmpcontnent );
-
-  varname = tmpvarname;
-  contnent = tmpcontnent;
-
-  return elvend;
-
-};
-
-/* *************************************************************
-************************************************************* */
-
-
-/* *************************************************************
-************************************************************* */
-
-void Elevdat45::out( ofstream& ofile,
-                      const float& col,
-                      const float& row,
-                      const string& varname,
-                      const float& carea,
-                      const double& elev,
-                      const string& contnent )
-{
-
-  ofile.setf( ios::fixed,ios::floatfield );
-  ofile.setf( ios::showpoint );
-  ofile.precision( 1 );
-
-  ofile << col << ' ';
-  ofile << row << ' ';
-  ofile << varname << ' ';
-  ofile << setprecision( 2 ) << carea << ' ';
-  ofile << setprecision( 1 ) << elev << ' ';
-  ofile << contnent;
-  ofile << endl;
-
-};
-
-/* *************************************************************
-************************************************************* */
-
-
-/* *************************************************************
-************************************************************* */
-
-void Elevdat45::outdel( ofstream& ofile,
-                         const float& col,
-                         const float& row,
-                         const string& varname,
-                         const float& carea,
-                         const double& elev,
-                         const string& contnent )
-{
-
-  ofile.setf( ios::fixed,ios::floatfield );
-  ofile.setf( ios::showpoint );
-  ofile.precision( 1 );
-
-  ofile << col << ",";
-  ofile << row << ", ";
-  ofile << varname << " ,";
-  ofile << setprecision( 2 ) << carea << ",";
-  ofile << setprecision( 1 ) << elev << ", ";
-  ofile << contnent;
-  ofile << endl;
-
-};
-
+}

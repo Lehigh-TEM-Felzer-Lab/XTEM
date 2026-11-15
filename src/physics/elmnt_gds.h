@@ -2,11 +2,10 @@
 ELMNT_GDS.H - Contains functions to manage elements used in GIS
              (Note: Elements are usually grid cells)
 
-Modifications:
-
-20060113 - DWK created by modifying elmnt50b5.h
-20060113 - DWK change class Elmnt50 to class Elmnt43
-20070105 - TWC changed name to elmnt45
+Version: XTEM version 4.5
+20241110 Changed: version number 4.5 (only the input and output, configuration and time handling changed).
+20241110 Changed: col and row renamed lon and lat.
+20241109 Changed: the names have the suffix 50; nothing else.
 
 ************************************************************** */
 
@@ -24,21 +23,21 @@ class Elmnt45
                  Public Functions
 ************************************************************** */
 
-     int coregerr( ofstream& rflog1,
+     int coregerr( std::ostream& rflog1,
                    const string& varname1,
-                   const float& col1,
-                   const float& row1,
+                   const float& lon1,
+                   const float& lat1,
                    const string& varname2,
-                   const float& col2,
-                   const float& row2 );
+                   const float& lon2,
+                   const float& lat2 );
 
-     void show( ofstream& rflog1,
-                const float& col,
-                const float& row );
+     void show( std::ostream& rflog1,
+                const float& lon,
+                const float& lat );
 
-     void show( ofstream& rflog1,
-                const float& col,
-                const float& row,
+     void show( std::ostream& rflog1,
+                const float& lon,
+                const float& lat,
                 const long& totyr,
                 const double& tol,
                 const double& errcnt );
@@ -48,7 +47,7 @@ class Elmnt45
 ************************************************************** */
 
      // Column or longitude of element
-     float col;
+     float lon;
 
      // Area of element
      float carea;
@@ -69,7 +68,7 @@ class Elmnt45
      long numskip;
 
      // Row or latitude of element
-     float row;
+     float lat;
 
      int stopflag;
 

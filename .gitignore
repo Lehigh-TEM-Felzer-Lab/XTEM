@@ -1,0 +1,14 @@
+build/
+__pycache__/
+**/HIST/
+**/OUTPUT/
+**/logs/
+**/TEMSTATE*
+*.log
+run.out
+build_mpi/
+examples/r_*/
+examples/try_*/
+examples/s_*/
+*.log.*
+**/regrid/

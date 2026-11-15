@@ -3,19 +3,12 @@ TCLMDAT_GDS.H - object to read and write the structure of the
                 climate data from files used by the Terrestrial
                 Ecosystem Model (TEM)
 
-20060114 - DWK created by modifying tclmdat425.h
-20060114 - DWK changed class Clmdata to class Clmdata43
-20060114 - DWK changed long year to int year in
-           out(), outdel(), pctout() and pctoutdel()
-20060114 - DWK changed char varname[9] to string varname in
-           out(), outdel(), pctout() and pctoutdel()
-20060114 - DWK changed char contnent[9] to string contnent in
-           out(), outdel(), pctout() and pctoutdel()
-20060114 - DWK changed public variable char varname[9] to
-           string varname
-20060114 - DWK changed public variable char contnent[9] to
-           string contnent
-20060114 - DWK deleted tclmdat425.cpp at bottom of file
+Version: XTEM version 4.5
+20241110 Changed: version number 4.5 (only the input and output, configuration and time handling changed).
+20241110 Changed: col and row renamed lon and lat.
+20241109 Changed: Monthly arrays are sized MAXCYCLE for the run step.
+20241110 Changed: Yearly and per-step arrays are std::vector sized at run time (CYCLE, NYEARS, NCOHORTS);
+         MAXCYCLE, MAXRTIME and MAXCHRTS removed.
 
 ************************************************************* */
 
@@ -24,12 +17,15 @@ TCLMDAT_GDS.H - object to read and write the structure of the
 
 #include "temconsts_gds.hpp"
 
+#include <string>
+
+namespace tem::nc { class Stream; }
+
 class Clmdat45
 {
 
   public:
 
-     Clmdat45( void );
 
 /* *************************************************************
 		      Public Functions
@@ -37,60 +33,20 @@ class Clmdat45
 
      // read data structure.
 
-     int get( ifstream& ifile );
-     int getdel( FILE* ifile );
-
-     //write data structure.
-
-     void out( ofstream& ofile,
-               const float& col,
-               const float& row,
-               const string& varname,
-               const float& carea,
-               const int& year,
-               double mon[CYCLE],
-               const string& contnent );
-
-     void outdel( ofstream& ofile,
-                  const float& col,
-                  const float& row,
-                  const string& varname,
-                  const float& carea,
-                  const int& year,
-                  double mon[CYCLE],
-                  const string& contnent );
-
-     void pctout( ofstream& ofile,
-                  const float& col,
-                  const float& row,
-                  const string& varname,
-                  const float& carea,
-                  const int& year,
-                  double mon[CYCLE],
-                  const string& contnent );
-
-     void poutdel( ofstream& ofile,
-                   const float& col,
-                   const float& row,
-                   const string& varname,
-                   const float& carea,
-                   const int& year,
-                   double mon[CYCLE],
-                   const string& contnent );
-
+     int read( tem::nc::Stream* ifile );
 
 /* *************************************************************
 		     Public Variables
 ************************************************************* */
 
-     // column or longitude of grid cell (degrees)
-     float col;
+     // longitude of grid cell (degrees)
+     float lon;
 
-     // row or latitude of grid cell (degrees)
-     float row;
+     // latitude of grid cell (degrees)
+     float lat;
 
      // climate variable name
-     string varname;
+     std::string varname;
 
      // area covered by grid cell (sq. km)
      float carea;
@@ -112,22 +68,10 @@ class Clmdat45
      double min;
 
      // monthly values for the grid cell
-     double mon[CYCLE];
+     std::vector<double> mon = std::vector<double>( CYCLE );
 
       // name of continent containing grid cell
-     string contnent;
-
-
-  private:
-
-/* *************************************************************
-		      Private Variables
-************************************************************* */
-
-     int clmend;
-     long curpos;
-     long lagpos;
-
+     std::string contnent;
 };
 
 #endif

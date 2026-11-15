@@ -2,28 +2,17 @@
 ****************************************************************
 TCLM_GDS.CPP - describes climate module used by TEM
 
-20060126 - DWK created by modifying tclm50b5.cpp
-20060126 - DWK changed include from tclm50b5.h to tclm437.h
-20060126 - DWK changed TEMclm50:: to TEMclmflux::
-20060126 - DWK changed inheritance from Atmosphere50 to
-           Atmosphere43 in TEMclmflux()
-20060126 - DWK added I_AOT to TEMclmflux()
-20060126 - DWK added void initO3(), double mkd40() and
-           void setO3Flags()
-20070105 - TWC changed name to tclm45
-2007 - TWC/BSF summary
-  predstr array: add VPD, TRANGE
-  inito3: add basline ozone file
-  initTrange
-  initVPD
+Version: XTEM version 4.5
+20241110 Changed: version number 4.5 (only the input and output, configuration and time handling changed).
+20241109 Changed: Output names are lowercase, to agree with the NetCDF names and the registry in
+         tem_outvars.cpp.
+20241109 Changed: Inputs come from NetCDF through the drivers; the text-file readers are removed.
 
 ****************************************************************
 ************************************************************* */
 
 #include<cstdio>
 
-  using std::FILE;
-  using std::fscanf;
 
 #include<iostream>
 
@@ -68,24 +57,24 @@ Tclm45::Tclm45() : Atms45(), predstr( NUMATMS )
 
 // Initialize predstr array
 
-  predstr.at( I_GIRR ) = "GIRR";
-  predstr.at( I_NIRR ) = "NIRR";
-  predstr.at( I_PAR ) = "PAR";
-  predstr.at( I_CLDS ) = "CLDINESS";
-  predstr.at( I_TAIR ) = "TAIR";
-  predstr.at( I_PREC ) = "PREC";
-  predstr.at( I_RAIN ) = "RAIN";
-  predstr.at( I_SNWFAL ) = "SNOWFALL";
-  predstr.at( I_CO2 ) = "CO2";
-  predstr.at( I_VPR ) = "VPR";
-  predstr.at( I_TRANGE ) = "TRANGE";
-  predstr.at( I_TAIRD ) = "TAIRD";
-  predstr.at( I_TAIRN ) = "TAIRN";
-  predstr.at( I_VPDD ) = "VPDD";
-  predstr.at( I_VPDN ) = "VPDN";
-  predstr.at( I_WS10 ) = "WS10";
-  predstr.at( I_AOT40 ) = "AOT40";
-  predstr.at( I_DAYL ) = "DAYL";
+  predstr.at( I_GIRR ) = "girr";
+  predstr.at( I_NIRR ) = "nirr";
+  predstr.at( I_PAR ) = "par";
+  predstr.at( I_CLDS ) = "cldiness";
+  predstr.at( I_TAIR ) = "tair";
+  predstr.at( I_PREC ) = "prec";
+  predstr.at( I_RAIN ) = "rain";
+  predstr.at( I_SNWFAL ) = "snowfall";
+  predstr.at( I_CO2 ) = "co2";
+  predstr.at( I_VPR ) = "vpr";
+  predstr.at( I_TRANGE ) = "trange";
+  predstr.at( I_TAIRD ) = "taird";
+  predstr.at( I_TAIRN ) = "tairn";
+  predstr.at( I_VPDD ) = "vpdd";
+  predstr.at( I_VPDN ) = "vpdn";
+  predstr.at( I_WS10 ) = "ws10";
+  predstr.at( I_AOT40 ) = "aot40";
+  predstr.at( I_DAYL ) = "dayl";
 
 };
 
@@ -276,21 +265,6 @@ double Tclm45::xgirr( const float& plat,
   int hour;
   double gross;
   double sumdaymonth;
-
-/*
-  ndays[0] = 31;
-  ndays[1] = 28;
-  ndays[2] = 31;
-  ndays[3] = 30;
-  ndays[4] = 31;
-  ndays[5] = 30;
-  ndays[6] = 31;
-  ndays[7] = 31;
-  ndays[8] = 30;
-  ndays[9] = 31;
-  ndays[10] = 30;
-  ndays[11] = 31;
-*/
 
   lambda = plat * pi / 180.0;
 

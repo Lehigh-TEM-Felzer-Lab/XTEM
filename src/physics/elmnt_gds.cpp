@@ -1,12 +1,10 @@
 /* *************************************************************
 ELMNT45_GDS.CPP - Contains functions to manage elements used in GIS
 
-Modifications:
-
-20060113 - DWK created by modifying elmnt50b5.cpp
-20060113 - DWK changed include from elmnt50b5.h to elmnt437.h
-20060113 - DWK changed Elmnt50:: to Elmnt43
-20070105 - TWC changed name to Elmnt45
+Version: XTEM version 4.5
+20241110 Changed: version number 4.5 (only the input and output, configuration and time handling changed).
+20241110 Changed: col and row renamed lon and lat.
+20241109 Changed: the names have the suffix 50; nothing else.
 
 ************************************************************** */
 
@@ -44,6 +42,9 @@ Modifications:
 #endif
 
 #include "elmnt_gds.h"
+#include "mpi_layer.h"
+#include "tem_log.h"
+#include <cstdio>
 
 
 Elmnt45::Elmnt45( void )
@@ -57,8 +58,8 @@ Elmnt45::Elmnt45( void )
   endflag  = 1;
   stopflag = 0;
 
-  col = -999.9;
-  row = -999.9;
+  lon = -999.9;
+  lat = -999.9;
   carea = -99;
   elev  = -999.9;
 
@@ -72,132 +73,77 @@ Elmnt45::Elmnt45( void )
 /* *************************************************************
 ************************************************************* */
 
-void Elmnt45::show( ofstream& rflog1,
-                    const float& col,
-                    const float& row )
+// Progress of the cells. The first call, before any cell has run, only starts the count. Later calls write a line to
+// the shared log (tem_log.h) for the first grdcnt cells of the rank and then for every 100th cell.
+void Elmnt45::show( std::ostream& rflog1,
+                    const float& lon,
+                    const float& lat )
 {
+  (void) rflog1;
+  show( rflog1, lon, lat, 0, 0.0, 0.0 );
+}
 
-  time_t timer;
-
-  timer = time( NULL );
-
-
-   cout.setf( ios::fixed,ios::floatfield );
-   cout.setf( ios::showpoint );
-   rflog1.setf( ios::fixed,ios::floatfield );
-   rflog1.setf( ios::showpoint );
-
-  if( 0 == count || (grdcnt != -99 && count <= grdcnt) )
-  {
-    cout << "Finished cell " << (count+numskip) << " (";
-    cout << setprecision( 4 ) << col << " , " << row << ") ";
-    cout << ctime( &timer );
-  }
-
-    if( count == grdcnt ||
-        (count < grdcnt && 0 == endflag && count == numgrids) )
-    {
-      cout << "Finished printing to the screen.  GOOD LUCK!!!!!" << endl;
-    }
-
-    rflog1 << "Finished cell ";
-    rflog1 << setprecision( 0 ) << (count+numskip) << " (";
-    rflog1 << setprecision(4) << col << " , " << row << ") ";
-    rflog1 << ctime(&timer);
-    if( 0 == endflag && count == numgrids ) { stopflag = 1; }
-
-    ++count;
-
-
-};
-
-/* *************************************************************
-************************************************************* */
-
-
-/* *************************************************************
-************************************************************* */
-
-void Elmnt45::show( ofstream& rflog1,
-                    const float& col,
-                    const float& row,
+void Elmnt45::show( std::ostream& rflog1,
+                    const float& lon,
+                    const float& lat,
                     const long& totyr,
                     const double& tol,
                     const double& errcnt )
 {
+  (void) rflog1;
 
-  time_t timer;
+  const bool started = ( lon > -999990.0f ); // the first call, before any cell, has no position yet
 
-  timer = time( NULL );
-
-  cout.setf( ios::fixed,ios::floatfield );
-  cout.setf( ios::showpoint );
-  rflog1.setf( ios::fixed,ios::floatfield );
-  rflog1.setf( ios::showpoint );
-
-  if( 0 == count || (grdcnt != -99 && count <= grdcnt) )
+  if( started && ( 1 == count || ( grdcnt != -99 && count <= grdcnt ) || 0 == count % 100 ) )
   {
-    cout << "Finished cell " << (count+numskip) << " (";
-    cout << setprecision( 1 ) << col << " , ";
-    cout << row << ")  TOTYR = ";
-    cout << setprecision( 0 ) << totyr << " TOL = ";
-    cout << setprecision( 6 ) << tol << " " << ctime( &timer );
+    const long cellno = ( count - 1 ) * tem::mpi::size() + tem::mpi::rank() + 1 + numskip;
+    char d[80];
+    std::snprintf( d, sizeof d, "last year %ld, integrator tolerance %.4g", totyr, tol );
+    tem::log::cell( cellno, lon, lat, d );
   }
 
-  if( count == grdcnt ||
-      (count < grdcnt && 0 == endflag && count == numgrids) )
-  {
-    cout << "Finished printing to the screen.  GOOD LUCK!!!!!" << endl;
-  }
-
-  rflog1 << "Finished cell " << setprecision( 0 ) << (count+numskip) << " (";
-//  rflog1 << "Finished cell " << setprecision( 0 ) << (count+numskip) << " (" << setprecision( 4 ) << col << " , " << row << ")  TOTYR = " << setprecision( 0 ) << totyr << " TOL = " << setprecision( 6 ) << tol << " " << ctime( &timer );
-  rflog1 << setprecision( 4 ) << col << " , " << row << ")  TOTYR = ";
-  rflog1 << setprecision( 0 ) << totyr << " TOL = ";
-  rflog1 << setprecision( 6 ) << tol << " " << ctime( &timer ) << endl;
-  if(errcnt > 0.0) {rflog1 << "labile carbon error occurs" << endl;}
+  if( started && errcnt > 0.0 ) { tem::log::warn( "labile carbon error in the cell at lon " + std::to_string( lon ) + ", lat " + std::to_string( lat ) ); }
 
   if( 0 == endflag && count == numgrids ) { stopflag = 1; }
 
   ++count;
-
-};
-
-/* *************************************************************
-************************************************************* */
-
+}
 
 /* *************************************************************
 ************************************************************* */
 
-int Elmnt45::coregerr( ofstream& rflog1,
+
+/* *************************************************************
+************************************************************* */
+
+int Elmnt45::coregerr( std::ostream& rflog1,
                        const string& varname1,
-                       const float& col1,
-                       const float& row1,
+                       const float& lon1,
+                       const float& lat1,
                        const string& varname2,
-                       const float& col2,
-                       const float& row2 )
+                       const float& lon2,
+                       const float& lat2 )
 {
 
   int fatalerr = 0;
 
-  if( col1 != col2 || row1 != row2 )
+  if( lon1 != lon2 || lat1 != lat2 )
   {
     fatalerr = 1;
 
     cout << "ERROR:  " << varname1 << " data and ";
     cout << varname2 << "data are not coregistered." << endl;
-    cout << "COL = " << col1 << " and ROW = " << row1;
+    cout << "lon = " << lon1 << " and lat = " << lat1;
     cout << " in " << varname1 << " data" << endl;
-    cout << "COL = " << col2 << " and ROW = " << row2;
+    cout << "lon = " << lon2 << " and lat = " << lat2;
     cout << " in " << varname2 << " data" << endl;
 
 
     rflog1 << "ERROR:  " << varname1 << " data and ";
     rflog1 << varname2 << "data are not coregistered." << endl;
-    rflog1 << "COL = " << col1 << " and ROW = " << row1;
+    rflog1 << "lon = " << lon1 << " and lat = " << lat1;
     rflog1 << " in " << varname1 << " data" << endl;
-    rflog1 << "COL = " << col2 << " and ROW = " << row2;
+    rflog1 << "lon = " << lon2 << " and lat = " << lat2;
     rflog1 << " in " << varname2 << " data" << endl;
   }
 

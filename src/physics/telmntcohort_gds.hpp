@@ -2,16 +2,11 @@
 TELMNTCOHORT_GDS.HPP - Container class to hold land cover cohort
                       characteristics
 
-20060126 - Created by DWK by modifying tlmntcohort50b5.hpp
-20060126 - DWK changed include from temconsts51.hpp to
-           temconsts43.hpp
-20060126 - DWK changed struct ElmntCohort50 to ElmntCohort43
-20060126 - DWK deleted  double dst10[CYCLE], double prevdst10,
-           double STMdx9[MAXNODES], int STMis9, int STMsmass9,
-           double STMt9[MAXNODES], double STMwater9[MAXNODES],
-           double STMweight9[MAXSNODES], double STMx9[MAXNODES],
-           double STMxfa9[MAXNODES], double STMxfb9[MAXNODES]
-20070105 - TWC changed name to telmntcohort45
+Version: XTEM version 4.5
+20241110 Changed: version number 4.5 (only the input and output, configuration and time handling changed).
+20241109 Updated: Sizes the monthly arrays MAXCYCLE.
+20241110 Changed: Yearly and per-step arrays are std::vector sized at run time (CYCLE, NYEARS, NCOHORTS);
+         MAXCYCLE, MAXRTIME and MAXCHRTS removed.
 
 ************************************************************* */
 
@@ -93,7 +88,7 @@ struct ElmntCohort45
   // Fire return interval
   int FRI;
 
-  Biomass initPROD1[CYCLE];
+  std::vector<Biomass> initPROD1 = std::vector<Biomass>( 12 );
   Biomass initPROD10[10];
   Biomass initPROD100[100];
 
